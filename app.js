@@ -157,6 +157,8 @@ function balances() {
   const acc = {}, fund = {}, person = {};
   const merge = (to, from) => { for (const k in from) to[k] = (to[k] || 0) + from[k]; };
   for (const t of state.txs) { const e = effects(t); merge(acc, e.acc); merge(fund, e.fund); merge(person, e.person); }
+  // Round to cents so tiny floating-point leftovers don't show as red −R0.00.
+  for (const o of [acc, fund, person]) for (const k in o) o[k] = Math.round(o[k] * 100) / 100 || 0;
   return { acc, fund, person };
 }
 
