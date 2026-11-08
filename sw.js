@@ -1,6 +1,6 @@
 // Caches the app shell so it opens fast. Data always comes live from the sheet.
-const CACHE = 'accounting-v1';
-const SHELL = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icons/icon-180.png'];
+const CACHE = 'accounting-v2';
+const SHELL = ['./', 'index.html', 'app.js', 'style.css', 'manifest.webmanifest', 'icons/icon-180.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)));
   self.skipWaiting();

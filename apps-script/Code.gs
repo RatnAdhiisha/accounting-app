@@ -63,7 +63,7 @@ const TABS = {
   Transactions: {
     headers: ['id', 'date', 'type', 'amount', 'currency', 'rate', 'amount_zar',
               'account', 'to_account', 'fund', 'to_fund', 'category', 'person',
-              'fee', 'note', 'receipt_url', 'created_at'],
+              'fee', 'note', 'receipt_url', 'created_at', 'source'],
     rows: [],
   },
 };
@@ -133,11 +133,19 @@ function doPost(e) {
     switch (req.action) {
       case 'addTransaction': {
         const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Transactions');
-        const headers = TABS.Transactions.headers;
+        const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
         const t = Object.assign({}, req.data, {
           id: Utilities.getUuid(), created_at: new Date().toISOString() });
         sh.appendRow(headers.map(h => t[h] === undefined ? '' : t[h]));
         return json_({ ok: true, data: { id: t.id } });
+      }
+      case 'deleteTransaction': {
+        const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Transactions');
+        const ids = sh.getRange(1, 1, sh.getLastRow(), 1).getValues();
+        for (let i = ids.length - 1; i >= 1; i--) {
+          if (ids[i][0] === req.data.id) { sh.deleteRow(i + 1); return json_({ ok: true, data: { id: req.data.id } }); }
+        }
+        throw new Error('Entry not found');
       }
       default: throw new Error('Unknown action');
     }
