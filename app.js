@@ -1,7 +1,7 @@
 // Accounting app, version 0.2: quick entry, balances home screen, entry list.
 'use strict';
 
-const VERSION = '0.2';
+const VERSION = '0.3';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -87,12 +87,12 @@ const TYPES = [
   { id: 'expense',   label: 'Expense',   main: true, dir: -1, hint: 'Money out of an account.' },
   { id: 'income',    label: 'Income',    main: true, dir: +1, hint: 'Money into an account.' },
   { id: 'transfer',  label: 'Transfer',  main: true, dir: 0,  hint: 'Move money between accounts or pockets.' },
-  { id: 'loan',      label: 'Lent',      dir: -1, person: +1, hint: 'You lend money. They will owe you.' },
+  { id: 'loan',      label: 'Lent',      dir: -1, person: +1, hint: 'You lend money. They will owe it to the fund. Pick "No cash" for stock or charges with no money moving.' },
   { id: 'advance',   label: 'Advance',   dir: -1, person: +1, hint: 'Paid ahead of a payment. They owe it until it is deducted.' },
   { id: 'repayment', label: 'Got back',  dir: +1, person: -1, hint: 'Someone pays you back. Their debt goes down.' },
   { id: 'borrow',    label: 'Borrowed',  dir: +1, person: -1, hint: 'You borrow money. You will owe them.' },
   { id: 'payback',   label: 'Paid back', dir: -1, person: +1, hint: 'You pay back what you borrowed.' },
-  { id: 'opening',   label: 'Opening',   dir: +1, hint: 'Starting balance of an account, or what a person owes you (minus if you owe them).' },
+  { id: 'opening',   label: 'Opening',   dir: +1, hint: 'Starting balance of an account, or what a person owes a fund (minus if the fund owes them).' },
   // Used by the sheet import; not offered as buttons.
   { id: 'exchange',      label: 'Exchange',      dir: 0, hidden: true },
   { id: 'fund_transfer', label: 'Fund transfer', dir: 0, hidden: true },
@@ -142,13 +142,15 @@ function effects(t) {
     if (t.to_fund && t.to_fund !== t.fund) { add(fund, t.fund, -zar); add(fund, t.to_fund, zar); }
     add(fund, t.fund, -feeZar);
   } else if (type.id === 'opening') {
+    // A person's opening balance has no account: it belongs to a fund but doesn't add money to it.
     add(acc, t.account, amt);
-    add(fund, t.fund, zar);
-    add(person, t.person, zar);
+    if (t.account) add(fund, t.fund, zar);
+    if (t.person) add(person, t.person + '|' + (t.fund || ''), zar);
   } else {
+    // No account = no cash moved (e.g. stock handed to a partner): only the person balance changes.
     add(acc, t.account, type.dir * amt - feeAcc);
-    add(fund, t.fund, type.dir * zar - feeZar);
-    if (type.person) add(person, t.person, type.person * zar);
+    if (t.account) add(fund, t.fund, type.dir * zar - feeZar);
+    if (type.person && t.person) add(person, t.person + '|' + (t.fund || ''), type.person * zar);
   }
   return { acc, fund, person, zar, feeZar };
 }
@@ -157,7 +159,22 @@ function balances() {
   const acc = {}, fund = {}, person = {};
   const merge = (to, from) => { for (const k in from) to[k] = (to[k] || 0) + from[k]; };
   for (const t of state.txs) { const e = effects(t); merge(acc, e.acc); merge(fund, e.fund); merge(person, e.person); }
-  return { acc, fund, person };
+  // Round to cents so tiny floating-point leftovers don't show as red −R0.00.
+  for (const o of [acc, fund, person]) for (const k in o) o[k] = Math.round(o[k] * 100) / 100 || 0;
+  return { acc, fund, person, owed: owedByPerson(person) };
+}
+
+// Person debts, grouped by person, each split by the fund it belongs to.
+function owedByPerson(person) {
+  const out = {};
+  for (const k in person) {
+    if (!person[k]) continue;
+    const [pid, fid] = k.split('|');
+    const o = out[pid] = out[pid] || { total: 0, funds: {} };
+    o.total = Math.round((o.total + person[k]) * 100) / 100;
+    o.funds[fid] = person[k];
+  }
+  return out;
 }
 
 // Latest rate used for a currency, to show foreign cash in rand.
@@ -259,13 +276,23 @@ function renderHome(v) {
     return `<div class="row"><span class="name">${esc(f.name)}</span><span class="amt ${x < 0 ? 'neg' : ''}">${money(x)}</span></div>`;
   }).join('');
 
-  const owed = L.people().map(p => ({ p, x: b.person[p.id] || 0 })).filter(o => Math.abs(o.x) > 0.004)
-    .sort((a, b) => b.x - a.x);
-  const peopleRows = owed.length ? owed.map(({ p, x }) =>
-    `<div class="row"><span class="name">${esc(p.name)} <span class="muted small">${x > 0 ? 'owes you' : 'you owe'}</span></span><span class="amt ${x < 0 ? 'neg' : ''}">${money(Math.abs(x))}</span></div>`
-  ).join('') : '<div class="empty small">Nobody owes anything.</div>';
-  const owesMe = owed.filter(o => o.x > 0).reduce((s, o) => s + o.x, 0);
-  const iOwe = owed.filter(o => o.x < 0).reduce((s, o) => s - o.x, 0);
+  // Each debt belongs to a fund: "School owes Dada K's feeding program R1,049".
+  const fundLabel = fid => !fid ? 'no fund set' : fid === 'personal' ? 'you (Personal)' : nameOf(L.funds(), fid);
+  const debtLine = (x, fid) => x > 0 ? `owes ${fundLabel(fid)}` : `${fundLabel(fid)} owes them`;
+  const owed = L.people().map(p => ({ p, o: b.owed[p.id] })).filter(r => r.o && Object.keys(r.o.funds).length)
+    .sort((a, b) => b.o.total - a.o.total);
+  const peopleRows = owed.length ? owed.map(({ p, o }) => {
+    const parts = Object.entries(o.funds).sort((a, b) => b[1] - a[1]);
+    if (parts.length === 1) {
+      const [fid, x] = parts[0];
+      return `<div class="row"><span class="name">${esc(p.name)} <span class="muted small">${esc(debtLine(x, fid))}</span></span><span class="amt ${x < 0 ? 'neg' : ''}">${money(Math.abs(x))}</span></div>`;
+    }
+    return `<div class="row parent"><span class="name">${esc(p.name)} <span class="muted small">${o.total >= 0 ? 'owes in all' : 'is owed in all'}</span></span><span class="amt ${o.total < 0 ? 'neg' : ''}">${money(Math.abs(o.total))}</span></div>` +
+      parts.map(([fid, x]) => `<div class="row sub"><span class="name">${esc(debtLine(x, fid))}</span><span class="amt ${x < 0 ? 'neg' : ''}">${money(Math.abs(x))}</span></div>`).join('');
+  }).join('') : '<div class="empty small">Nobody owes anything.</div>';
+  const all = Object.values(b.person);
+  const owesMe = all.filter(x => x > 0).reduce((s, x) => s + x, 0);
+  const iOwe = all.filter(x => x < 0).reduce((s, x) => s - x, 0);
 
   const recent = sortedTxs().slice(0, 5);
 
@@ -275,7 +302,7 @@ function renderHome(v) {
     <div class="total-box">
       <div class="small">All money${missingRate ? ' (foreign cash without a rate left out)' : ''}</div>
       <div class="big">${money(totalZar)}</div>
-      ${owesMe || iOwe ? `<div class="small">${owesMe ? 'Owed to you ' + money(owesMe) : ''}${owesMe && iOwe ? ' · ' : ''}${iOwe ? 'You owe ' + money(iOwe) : ''}</div>` : ''}
+      ${owesMe || iOwe ? `<div class="small">${owesMe ? 'Owed back ' + money(owesMe) : ''}${owesMe && iOwe ? ' · ' : ''}${iOwe ? 'Owed to others ' + money(iOwe) : ''}</div>` : ''}
     </div>
     <h2>Accounts</h2><div class="card">${accRows}</div>
     <h2>Funds (whose money)</h2><div class="card">${fundRows}</div>
@@ -367,7 +394,7 @@ function renderAdd(v) {
       ${type.person || isOpening ? `<div class="lbl">Person${isOpening ? ' (only for a person\'s opening balance)' : ''}</div>${chips('person', people, form.person, isOpening ? { none: 'No one' } : {})}` : ''}
 
       <div class="lbl">${isTransfer ? 'From' : 'Account'}</div>
-      ${chips('account', accs, form.account, isOpening ? { none: 'None' } : {})}
+      ${chips('account', accs, form.account, isOpening ? { none: 'None' } : type.person ? { none: 'No cash' } : {})}
 
       ${isTransfer ? `<div class="lbl">To</div>${chips('to_account', accs.filter(a => a.id !== form.account), form.to_account)}` : ''}
 
@@ -414,7 +441,7 @@ function renderAdd(v) {
         form.category = cats[val] || '';
         if (val === 'opening') { form.fee = ''; }
       } else if (name === 'account') {
-        form.account = val; form.fund = fundFor(val);
+        form.account = val; if (val) form.fund = fundFor(val);
         if (form.to_account === val) form.to_account = '';
       } else {
         form[name] = (form[name] === val && name !== 'fund') ? '' : val;
@@ -437,7 +464,7 @@ function validate() {
     if (form.account && !form.fund) return 'Pick the fund this money belongs to.';
     return '';
   }
-  if (!form.account) return 'Pick an account.';
+  if (!form.account && !type.person) return 'Pick an account.';
   if (!form.fund) return 'Pick a fund.';
   if (type.id === 'transfer') {
     if (!form.to_account && !(form.moveFund && form.to_fund)) return 'Pick where the money goes.';
