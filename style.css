@@ -86,3 +86,25 @@ button.danger { color:var(--bad); }
 .filters select { font-size:14px; padding:8px; }
 .empty { padding:18px 0; text-align:center; color:var(--muted); }
 dl { margin:0; } dt { color:var(--muted); font-size:13px; margin-top:10px; } dd { margin:2px 0 0; }
+
+/* Split payments */
+.left-box { position:sticky; top:0; z-index:4; display:flex; justify-content:space-between; align-items:baseline;
+  margin:16px -4px 8px; padding:10px 14px; border-radius:10px; background:var(--accent-soft); color:var(--text);
+  font-variant-numeric: tabular-nums; box-shadow:0 1px 0 var(--line); }
+.left-box b { font-size:20px; }
+.left-box.done { background:var(--accent); color:#fff; }
+@media (prefers-color-scheme: dark) { .left-box.done { color:#0d1a14; } }
+.left-box.over { background:var(--bad); color:#fff; }
+.parts { display:flex; flex-direction:column; gap:8px; }
+.part { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; background:var(--card);
+  border:1px solid var(--line); border-radius:12px; padding:10px 12px; }
+.card .part { border:0; border-top:1px solid var(--line); border-radius:0; padding:10px 0; }
+.card .part:first-child { border-top:0; }
+.part .l { min-width:0; flex:1; }
+.part .t1 { font-weight:600; font-variant-numeric: tabular-nums; }
+.part .t2 { color:var(--muted); font-size:13px; }
+.part.open { display:block; border-color:var(--accent); }
+.part-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+.part .x { background:none; border:0; color:var(--muted); font-size:24px; line-height:1; padding:0 4px; width:auto; }
+.small-amt span { font-size:20px; } .small-amt input { font-size:22px; }
+.link.danger { color:var(--bad); }

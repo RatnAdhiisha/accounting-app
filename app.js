@@ -1,7 +1,7 @@
-// Accounting app, version 0.2: quick entry, balances home screen, entry list.
+// Accounting app: quick entry, split payments, balances home screen, entry list.
 'use strict';
 
-const VERSION = '0.3';
+const VERSION = '0.4';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -33,6 +33,7 @@ async function api(action, body) {
 const state = {
   lists: store.getJSON('cacheLists', null),
   txs: store.getJSON('cacheTxs', []),
+  drafts: store.getJSON('cacheDrafts', []),
   loadedAt: store.get('cacheAt'),
   loading: false,
   error: '',
@@ -50,6 +51,8 @@ async function refresh() {
   } catch (e) {
     state.error = e.message;
   }
+  // Drafts need the updated Apps Script; an older one just means no drafts.
+  try { state.drafts = await api('drafts'); store.setJSON('cacheDrafts', state.drafts); } catch (e) {}
   state.loading = false;
   render();
 }
@@ -87,8 +90,11 @@ const TYPES = [
   { id: 'expense',   label: 'Expense',   main: true, dir: -1, hint: 'Money out of an account.' },
   { id: 'income',    label: 'Income',    main: true, dir: +1, hint: 'Money into an account.' },
   { id: 'transfer',  label: 'Transfer',  main: true, dir: 0,  hint: 'Move money between accounts or pockets.' },
+  { id: 'payment',   label: 'Payment',   dir: -1, who: true, cat: 'stipends', hint: 'Paid to someone for work (e.g. trips). Nobody owes anything after.' },
+  { id: 'gift',      label: 'Gift',      dir: -1, who: true, cat: 'donations', hint: 'A gift to someone. Shown with the person, not a debt.' },
   { id: 'loan',      label: 'Lent',      dir: -1, person: +1, hint: 'You lend money. They will owe it to the fund. Pick "No cash" for stock or charges with no money moving.' },
   { id: 'advance',   label: 'Advance',   dir: -1, person: +1, hint: 'Paid ahead of a payment. They owe it until it is deducted.' },
+  { id: 'bring_back', label: 'Bring back', dir: -1, person: +1, hint: 'They hold your money (e.g. withdraw cash for you) until they bring it back.' },
   { id: 'repayment', label: 'Got back',  dir: +1, person: -1, hint: 'Someone pays you back. Their debt goes down.' },
   { id: 'borrow',    label: 'Borrowed',  dir: +1, person: -1, hint: 'You borrow money. You will owe them.' },
   { id: 'payback',   label: 'Paid back', dir: -1, person: +1, hint: 'You pay back what you borrowed.' },
@@ -96,6 +102,8 @@ const TYPES = [
   // Used by the sheet import; not offered as buttons.
   { id: 'exchange',      label: 'Exchange',      dir: 0, hidden: true },
   { id: 'fund_transfer', label: 'Fund transfer', dir: 0, hidden: true },
+  // Part of a split payment: an advance taken earlier, now deducted from the payment. No cash moves.
+  { id: 'advance_used',  label: 'Advance deducted', dir: -1, person: -1, hidden: true },
 ];
 const typeOf = id => TYPES.find(t => t.id === id) || TYPES[0];
 const isMove = t => ['transfer', 'exchange', 'fund_transfer'].includes(typeOf(t.type).id);
@@ -221,6 +229,8 @@ function render() {
   const v = $('view');
   if (tab === 'add') { if (!v.querySelector('#entry-form') || render.lastTab !== 'add') renderAdd(v); }
   else if (tab === 'list') renderList(v);
+  else if (tab === 'split') { if (!v.querySelector('#split-form') || render.lastTab !== 'split' || !split.ready) renderSplit(v, route().slice(1)); }
+  else if (tab === 'pay') renderPay(v, arg);
   else if (tab === 'tx') renderTx(v, arg);
   else if (tab === 'settings') renderSettings(v);
   else renderHome(v);
@@ -294,7 +304,8 @@ function renderHome(v) {
   const owesMe = all.filter(x => x > 0).reduce((s, x) => s + x, 0);
   const iOwe = all.filter(x => x < 0).reduce((s, x) => s - x, 0);
 
-  const recent = sortedTxs().slice(0, 5);
+  const recent = listItems(sortedTxs(), false).slice(0, 5);
+  const drafts = state.drafts.map(d => Object.assign({ id: d.id }, draftInfo(d)));
 
   v.innerHTML = `
     <header><h1>Accounting</h1><button class="refresh" id="refresh">↻ Refresh</button></header>
@@ -304,14 +315,16 @@ function renderHome(v) {
       <div class="big">${money(totalZar)}</div>
       ${owesMe || iOwe ? `<div class="small">${owesMe ? 'Owed back ' + money(owesMe) : ''}${owesMe && iOwe ? ' · ' : ''}${iOwe ? 'Owed to others ' + money(iOwe) : ''}</div>` : ''}
     </div>
+    ${drafts.length ? `<h2>Drafts to finish</h2><div class="card">${drafts.map(d => `<div class="tx" data-draft="${esc(d.id)}"><div class="l"><div class="t1">${esc(d.who)}</div><div class="t2">${esc(niceDate(d.date))} · ${d.left ? money(d.left) + ' left to assign' : 'ready to save'}</div></div><div class="amt">${money(d.total)}</div></div>`).join('')}</div>` : ''}
     <h2>Accounts</h2><div class="card">${accRows}</div>
     <h2>Funds (whose money)</h2><div class="card">${fundRows}</div>
     <h2>People</h2><div class="card">${peopleRows}</div>
-    <h2>Recent</h2><div class="card">${recent.length ? recent.map(txRow).join('') : '<div class="empty small">No entries yet. Tap + to add one.</div>'}</div>
+    <h2>Recent</h2><div class="card">${recent.length ? recent.map(itemRow).join('') : '<div class="empty small">No entries yet. Tap + to add one.</div>'}</div>
     ${recent.length ? '<p><a class="link" href="#list">All entries ›</a></p>' : ''}
   `;
   $('refresh').onclick = refresh;
   bindTxRows(v);
+  v.querySelectorAll('[data-draft]').forEach(el => el.onclick = () => { location.hash = '#split/draft/' + encodeURIComponent(el.dataset.draft); });
 }
 
 function sortedTxs() {
@@ -331,12 +344,45 @@ function txRow(t) {
   const cur = accCurrency(t.account);
   const amt = num(t.amount);
   const sign = isMove(t) ? '' : (type.dir > 0 ? '+' : '−');
+  let partOf = '';
+  if (t.group_id) {
+    const cash = cashRows(groupRows(t.group_id));
+    if (cash.length > 1 || t.type === 'advance_used') {
+      const g = cash.reduce((s, x) => s + num(x.amount), 0);
+      partOf = `part of ${money(g)}${t.paid_to ? ' to ' + nameOf(L.people(), t.paid_to) : ''}`;
+    }
+  }
   const bits = [niceDate(t.date), isMove(t) ? type.label : accName(t.account),
-    nameOf(L.funds(), t.fund), t.person ? nameOf(L.people(), t.person) : ''].filter(Boolean);
+    nameOf(L.funds(), t.fund), t.person ? nameOf(L.people(), t.person) : '', partOf].filter(Boolean);
   return `<div class="tx" data-id="${esc(t.id)}"><div class="l"><div class="t1">${esc(txTitle(t))}</div><div class="t2">${esc(bits.join(' · '))}</div></div>
     <div class="amt ${type.dir > 0 && type.id !== 'opening' ? 'in' : ''}">${sign}${money(amt, cur)}</div></div>`;
 }
+// Lists show one line per payment; with a fund, account or person filter, the matching parts instead.
+function listItems(rows, showParts) {
+  if (showParts) return rows.map(t => ({ t }));
+  const seen = new Set(), out = [];
+  for (const t of rows) {
+    if (!t.group_id) { out.push({ t }); continue; }
+    if (seen.has(t.group_id)) continue;
+    seen.add(t.group_id); out.push({ g: t.group_id });
+  }
+  return out;
+}
+function itemRow(it) {
+  if (it.t) return txRow(it.t);
+  const rows = groupRows(it.g), cash = cashRows(rows);
+  if (cash.length === 1 && rows.length === 1) return txRow(cash[0]);
+  const first = cash[0] || rows[0];
+  const out = typeOf(first.type).dir < 0;
+  const total = cash.reduce((s, x) => s + num(x.amount), 0);
+  const notes = [...new Set(cash.map(x => x.note || ''))];
+  const title = first.paid_to ? `${out ? 'To' : 'From'} ${nameOf(L.people(), first.paid_to)}` : (notes.length === 1 && notes[0]) || 'Split payment';
+  const bits = [niceDate(first.date), nameOf(L.accounts(), topOf(first.account)), `${cash.length} part${cash.length === 1 ? '' : 's'}`];
+  return `<div class="tx" data-gid="${esc(it.g)}"><div class="l"><div class="t1">${esc(title)}</div><div class="t2">${esc(bits.join(' · '))}</div></div>
+    <div class="amt ${out ? '' : 'in'}">${out ? '−' : '+'}${money(total)}</div></div>`;
+}
 function bindTxRows(v) {
+  v.querySelectorAll('.tx[data-gid]').forEach(el => el.onclick = () => { location.hash = '#pay/' + encodeURIComponent(el.dataset.gid); });
   v.querySelectorAll('.tx[data-id]').forEach(el => el.onclick = () => { location.hash = '#tx/' + encodeURIComponent(el.dataset.id); });
 }
 
@@ -351,7 +397,7 @@ function resetForm(keepType) {
   const account = (last.account && accounts.some(a => a.id === last.account)) ? last.account : (accounts[0] && accounts[0].id) || '';
   Object.assign(form, {
     type, amount: '', account, to_account: '', fund: fundFor(account), to_fund: '',
-    category: (last.cats || {})[type] || '', person: '', note: '', date: localDay(new Date()),
+    category: (last.cats || {})[type] || typeOf(type).cat || '', person: '', note: '', date: localDay(new Date()),
     fee: '', rate: '', moveFund: false,
   });
 }
@@ -391,7 +437,7 @@ function renderAdd(v) {
       <div class="amount-wrap"><span>${SYMBOL[cur] || cur}</span>
         <input id="f-amount" inputmode="decimal" enterkeyhint="done" placeholder="0.00" value="${esc(form.amount)}"></div>
 
-      ${type.person || isOpening ? `<div class="lbl">Person${isOpening ? ' (only for a person\'s opening balance)' : ''}</div>${chips('person', people, form.person, isOpening ? { none: 'No one' } : {})}` : ''}
+      ${type.person || type.who || isOpening ? `<div class="lbl">Person${isOpening ? ' (only for a person\'s opening balance)' : ''}</div>${chips('person', people, form.person, isOpening ? { none: 'No one' } : {})}` : ''}
 
       <div class="lbl">${isTransfer ? 'From' : 'Account'}</div>
       ${chips('account', accs, form.account, isOpening ? { none: 'None' } : type.person ? { none: 'No cash' } : {})}
@@ -408,7 +454,7 @@ function renderAdd(v) {
 
       ${!isTransfer && !isOpening ? `<div class="lbl">Category</div>${chips('category', cats, form.category, type.person ? { none: 'None' } : {})}` : ''}
 
-      ${!type.person && !isOpening && !isTransfer ? `<div class="lbl">Person (optional)</div>${chips('person', people, form.person, { none: 'No one' })}` : ''}
+      ${!type.person && !type.who && !isOpening && !isTransfer ? `<div class="lbl">Person (optional)</div>${chips('person', people, form.person, { none: 'No one' })}` : ''}
 
       <label for="f-note">Note</label>
       <input id="f-note" placeholder="What was it?" value="${esc(form.note)}" enterkeyhint="done">
@@ -420,6 +466,7 @@ function renderAdd(v) {
       ${!isOpening && isTyme ? `<button type="button" class="link" id="sms-fee">+ R0.50 SMS fee</button>` : ''}
 
       <button class="primary" id="save" type="submit">Save</button>
+      ${SPLIT_TYPES.has(type.id) && !isOpening && (!form.account || accCurrency(form.account) === 'ZAR') ? '<button type="button" class="ghost" id="to-split">Split into parts…</button>' : ''}
       <p id="form-msg" class="hint"></p>
     </form>`;
 
@@ -438,7 +485,7 @@ function renderAdd(v) {
       if (name === 'type') {
         form.type = val;
         const cats = (store.getJSON('lastEntry', {}).cats) || {};
-        form.category = cats[val] || '';
+        form.category = cats[val] || typeOf(val).cat || '';
         if (val === 'opening') { form.fee = ''; }
       } else if (name === 'account') {
         form.account = val; if (val) form.fund = fundFor(val);
@@ -452,6 +499,14 @@ function renderAdd(v) {
   if ($('f-movefund')) $('f-movefund').onchange = e => { sync(); form.moveFund = e.target.checked; form.to_fund = ''; renderAdd(v); };
   if ($('sms-fee')) $('sms-fee').onclick = () => { $('f-fee').value = (num($('f-fee').value) + 0.5).toFixed(2); };
   f.onsubmit = async e => { e.preventDefault(); sync(); await saveEntry(); };
+  if ($('to-split')) $('to-split').onclick = () => {
+    sync();
+    const pocket = form.account && postable().some(a => a.id === form.account) ? form.account : '';
+    splitSeed = { mode: typeOf(form.type).dir > 0 ? 'in' : 'out', total: form.amount, date: form.date, note: form.note,
+      account: pocket ? topOf(pocket) : '', fee: form.fee,
+      parts: [{ type: form.type, amount: '', pocket, fund: form.fund, category: form.category, person: form.person }] };
+    location.hash = '#split';
+  };
 }
 
 function validate() {
@@ -470,7 +525,7 @@ function validate() {
     if (!form.to_account && !(form.moveFund && form.to_fund)) return 'Pick where the money goes.';
     if (form.moveFund && !form.to_fund) return 'Pick the fund it moves to.';
   }
-  if (type.person && !form.person) return 'Pick the person.';
+  if ((type.person || type.who) && !form.person) return 'Pick the person.';
   if (!type.person && type.id !== 'transfer' && !form.category) return 'Pick a category.';
   const cur = accCurrency(form.account);
   const needRate = cur !== 'ZAR' || (type.id === 'transfer' && form.to_account && accCurrency(form.to_account) !== cur);
@@ -513,23 +568,442 @@ async function saveEntry() {
   }
 }
 
+// ---------- Split payments ----------
+// One bank or cash payment made of parts. Each part is saved as its own row (so balances and
+// reports work as before), and all rows of one payment share a group_id.
+
+const PART_TYPES = { out: ['expense', 'payment', 'gift', 'advance', 'loan', 'bring_back', 'payback'], in: ['income', 'repayment', 'borrow'] };
+const SPLIT_TYPES = new Set([...PART_TYPES.out, ...PART_TYPES.in]);
+const PART_LABEL = { expense: 'Spent', income: 'Income' };
+const round2 = x => Math.round(x * 100) / 100;
+const topOf = id => { const a = byId(L.accounts(), id); return a && a.parent ? a.parent : (id || ''); };
+// "From" choices: rand accounts that hold money (TymeBank, Cash ZAR, …).
+const fromAccounts = () => L.accounts().filter(a => !a.parent && isActive(a) && (a.currency || 'ZAR') === 'ZAR');
+// Where a part can come from: the pockets of the account, or the account itself.
+const pocketsOf = top => {
+  const kids = L.accounts().filter(c => c.parent === top && isActive(c));
+  return kids.length ? kids : L.accounts().filter(a => a.id === top);
+};
+const groupRows = gid => state.txs.filter(t => t.group_id === gid);
+const cashRows = rows => rows.filter(t => t.type !== 'advance_used');
+
+const split = { ready: false };
+let splitSeed = null;
+
+function newPart() {
+  const pockets = pocketsOf(split.account);
+  const used = split.parts ? split.parts.map(p => p.pocket) : [];
+  const pocket = (pockets.find(p => !used.includes(p.id)) || pockets[0] || {}).id || '';
+  const type = split.mode === 'in' ? 'income' : 'expense';
+  return { type, amount: '', pocket, fund: fundFor(pocket), category: '', person: split.paid_to || '', advance: '', note: '' };
+}
+
+function startSplit(args) {
+  const [kind, id] = args;
+  for (const k of Object.keys(split)) delete split[k];
+  if (kind === 'draft') {
+    const d = state.drafts.find(x => x.id === id);
+    if (!d) return false;
+    try { Object.assign(split, JSON.parse(d.data)); } catch (e) { return false; }
+    split.draftId = id;
+  } else if (kind === 'edit') {
+    const rows = state.txs.filter(t => t.group_id === id);
+    if (!rows.length) { const t = state.txs.find(x => x.id === id); if (t) rows.push(t); }
+    if (!rows.length) return false;
+    Object.assign(split, fromRows(rows));
+  } else {
+    const seed = splitSeed || {};
+    splitSeed = null;
+    const last = store.getJSON('lastEntry', {});
+    const accs = fromAccounts();
+    const account = seed.account || (last.account && topOf(last.account)) || (accs[0] && accs[0].id) || '';
+    Object.assign(split, { mode: seed.mode || 'out', total: seed.total || '', date: seed.date || localDay(new Date()),
+      account: accs.some(a => a.id === account) ? account : ((accs[0] && accs[0].id) || ''),
+      paid_to: '', note: seed.note || '', fee: seed.fee || '', fee_part: 0, parts: [] });
+    split.parts = seed.parts && seed.parts.length
+      ? seed.parts.map(p => Object.assign(newPart(), p, { pocket: p.pocket || newPart().pocket }))
+      : [newPart()];
+  }
+  if (split.open === undefined) split.open = 0;
+  split.ready = true;
+  return true;
+}
+
+// Rebuild the form from saved rows (for Edit).
+function fromRows(rows) {
+  const cash = cashRows(rows), adv = rows.filter(t => t.type === 'advance_used');
+  const notes = [...new Set(cash.map(t => t.note || ''))];
+  const common = notes.length === 1 ? notes[0] : '';
+  const parts = cash.map(t => ({ type: t.type, amount: String(num(t.amount)), pocket: t.account, fund: t.fund,
+    category: t.category || '', person: t.person || '', advance: '', note: common ? '' : (t.note || '') }));
+  for (const a of adv) {
+    const p = parts.find(p => p.type === 'payment' && p.person === a.person && p.fund === a.fund && !p.advance);
+    if (p) p.advance = String(num(a.amount));
+  }
+  const feeIdx = cash.findIndex(t => num(t.fee));
+  return {
+    mode: typeOf(cash[0].type).dir > 0 ? 'in' : 'out',
+    total: String(round2(cash.reduce((s, t) => s + num(t.amount), 0))),
+    date: rows[0].date, account: topOf(cash[0].account), paid_to: rows[0].paid_to || '', note: common,
+    fee: feeIdx >= 0 ? String(num(cash[feeIdx].fee)) : '', fee_part: Math.max(feeIdx, 0),
+    parts, editGroup: rows[0].group_id || '', editIds: rows.map(t => t.id), open: null,
+  };
+}
+
+const splitLeft = () => round2(num(split.total) - split.parts.reduce((s, p) => s + num(p.amount), 0));
+function leftHtml() {
+  const left = splitLeft();
+  if (!num(split.total)) return '<span>Type the total first</span>';
+  if (left === 0) return `<span>Left</span><b>${money(0)} ✓</b>`;
+  if (left < 0) return `<span>Over by</span><b>${money(-left)}</b>`;
+  return `<span>Left</span><b>${money(left)}</b>`;
+}
+function updateLeft() {
+  const el = $('left-box'); if (!el) return;
+  const left = splitLeft();
+  el.innerHTML = leftHtml();
+  el.className = 'left-box' + (num(split.total) && left === 0 ? ' done' : left < 0 ? ' over' : '');
+}
+
+// What a part looks like folded: "R500 · Dada Guna · Gift · Tumelo".
+function partSummary(p) {
+  const type = typeOf(p.type);
+  const what = type.person || type.who ? (PART_LABEL[p.type] || type.label) : (nameOf(L.categories(), p.category) || PART_LABEL[p.type] || type.label);
+  const bits = [nameOf(L.accounts(), p.pocket), nameOf(L.funds(), p.fund), what, p.person ? nameOf(L.people(), p.person) : ''];
+  return { amt: num(p.amount), line: bits.filter(Boolean).join(' · '),
+    extra: num(p.advance) ? `earned ${money(num(p.amount) + num(p.advance))} − advance ${money(num(p.advance))}` : (p.note || '') };
+}
+
+function renderSplit(v, args) {
+  if (!state.lists) { v.innerHTML = `<header><h1>Split payment</h1></header><p class="muted">${state.loading ? 'Loading lists…' : 'Lists not loaded yet. Check Settings.'}</p>`; return; }
+  if (!split.ready && !startSplit(args)) {
+    v.innerHTML = `<header><h1>Split payment</h1></header><p class="muted">${state.loading ? 'Loading…' : 'Not found. It may have been saved or deleted.'}</p><p><a class="link" href="#home">‹ Home</a></p>`;
+    return;
+  }
+  const out = split.mode !== 'in';
+  const b = balances();
+  const funds = L.funds().filter(isActive);
+  const people = L.people().filter(isActive);
+  const pockets = pocketsOf(split.account);
+  const accs = fromAccounts();
+  const typeItems = PART_TYPES[split.mode].map(id => ({ id, label: PART_LABEL[id] || typeOf(id).label }));
+
+  const partHtml = (p, i) => {
+    if (i !== split.open) {
+      const s = partSummary(p);
+      return `<div class="part" data-open="${i}"><div class="l"><div class="t1">${i + 1}. ${num(p.amount) ? money(s.amt) : '<span class="muted">no amount</span>'}</div>
+        <div class="t2">${esc(s.line)}${s.extra ? '<br>' + esc(s.extra) : ''}</div></div>
+        ${split.parts.length > 1 ? `<button type="button" class="x" data-remove="${i}" aria-label="Remove part">×</button>` : ''}</div>`;
+    }
+    const type = typeOf(p.type);
+    const cats = L.categories().filter(isActive).filter(c => { const k = String(c.kind || 'both'); return k === 'both' || (out ? k === 'expense' : k === 'income'); });
+    const owed = p.person ? (b.person[p.person + '|' + (p.fund || '')] || 0) : 0;
+    const showAdv = p.type === 'payment' && p.person && (owed > 0 || num(p.advance));
+    return `<div class="part open">
+      <div class="part-head"><b>Part ${i + 1}</b>${split.parts.length > 1 ? `<button type="button" class="link danger" data-remove="${i}">Remove</button>` : ''}</div>
+      <div class="amount-wrap small-amt"><span>R</span><input id="p-amount" inputmode="decimal" enterkeyhint="done" placeholder="0.00" value="${esc(p.amount)}"></div>
+      <button type="button" class="link" id="fill-rest">Fill the rest</button>
+      ${pockets.length > 1 ? `<div class="lbl">Pocket</div>${chips('pocket', pockets, p.pocket)}` : ''}
+      <div class="lbl">What</div>${chips('ptype', typeItems, p.type)}
+      <div class="hint">${esc(type.hint || '')}</div>
+      <div class="lbl">Person${type.person || type.who ? '' : ' (optional)'}</div>${chips('person', people, p.person, type.person || type.who ? {} : { none: 'No one' })}
+      ${type.person ? '' : `<div class="lbl">Category</div>${chips('category', cats, p.category)}`}
+      <div class="lbl">Fund (whose money)</div>${chips('fund', funds, p.fund)}
+      ${showAdv ? `<label for="p-advance">Advance deducted (R)</label>
+        <input id="p-advance" inputmode="decimal" placeholder="0.00" value="${esc(p.advance)}">
+        <div class="hint">${owed > 0 ? `${esc(nameOf(L.people(), p.person))} owes this fund ${money(owed)}. ` : ''}Earned = paid now + advance.${owed > 0 && !num(p.advance) ? ` <button type="button" class="link" id="use-adv">Deduct ${money(owed)}</button>` : ''}</div>` : ''}
+      <label for="p-note">Part note (optional)</label>
+      <input id="p-note" placeholder="e.g. trips 1–15 Nov" value="${esc(p.note)}" enterkeyhint="done">
+      <button type="button" class="ghost" id="done-part">Done with this part</button>
+    </div>`;
+  };
+
+  const feePockets = split.parts.map((p, i) => ({ id: String(i), label: `${i + 1}. ${nameOf(L.accounts(), p.pocket)}` }));
+  v.innerHTML = `
+    <header><h1>${split.editGroup || split.editIds ? 'Edit payment' : 'Split payment'}</h1></header>
+    <form id="split-form" autocomplete="off">
+      ${chips('mode', [{ id: 'out', label: 'Money out' }, { id: 'in', label: 'Money in' }], split.mode)}
+      <label for="s-total">Total ${out ? 'paid' : 'received'}</label>
+      <div class="amount-wrap"><span>R</span><input id="s-total" inputmode="decimal" enterkeyhint="done" placeholder="0.00" value="${esc(split.total)}"></div>
+      <div class="lbl">${out ? 'From' : 'Into'}</div>${chips('account', accs, split.account)}
+      <div class="lbl">${out ? 'Paid to' : 'Received from'} (optional)</div>${chips('paid_to', people, split.paid_to, { none: 'No one' })}
+      <div id="left-box"></div>
+      <div class="parts">${split.parts.map(partHtml).join('')}</div>
+      <button type="button" class="ghost" id="add-part">+ Add part</button>
+      <div class="two">
+        <div><label for="s-date">Date</label><input id="s-date" type="date" value="${esc(split.date)}"></div>
+        <div><label for="s-fee">Bank fee (R)</label><input id="s-fee" inputmode="decimal" placeholder="0.00" value="${esc(split.fee)}"></div>
+      </div>
+      ${/^tyme/.test(split.account) ? '<button type="button" class="link" id="sms-fee">+ R0.50 SMS fee</button>' : ''}
+      ${num(split.fee) && split.parts.length > 1 ? `<div class="lbl">Fee taken from</div>${chips('fee_part', feePockets, String(split.fee_part || 0))}` : ''}
+      <label for="s-note">Note</label>
+      <input id="s-note" placeholder="e.g. Tumelo, November" value="${esc(split.note)}" enterkeyhint="done">
+      <button class="primary" id="save" type="submit">Save</button>
+      <button type="button" class="ghost" id="save-draft">Save as draft</button>
+      ${split.draftId ? '<button type="button" class="ghost danger" id="del-draft">Delete draft</button>' : ''}
+      <p id="form-msg" class="hint"></p>
+    </form>`;
+  updateLeft();
+
+  const sync = () => {
+    split.total = $('s-total').value; split.date = $('s-date').value; split.fee = $('s-fee').value; split.note = $('s-note').value;
+    const p = split.parts[split.open];
+    if (p && $('p-amount')) {
+      p.amount = $('p-amount').value; p.note = $('p-note').value;
+      if ($('p-advance')) p.advance = $('p-advance').value;
+    }
+  };
+  const redraw = () => { renderSplit(v, args); };
+  $('s-total').oninput = () => { split.total = $('s-total').value; updateLeft(); };
+  if ($('p-amount')) $('p-amount').oninput = () => { split.parts[split.open].amount = $('p-amount').value; updateLeft(); };
+  if ($('fill-rest')) $('fill-rest').onclick = () => {
+    sync(); const p = split.parts[split.open];
+    const rest = round2(num(p.amount) + splitLeft());
+    p.amount = rest > 0 ? String(rest) : ''; redraw();
+  };
+  if ($('use-adv')) $('use-adv').onclick = () => {
+    sync(); const p = split.parts[split.open];
+    p.advance = String(b.person[p.person + '|' + p.fund] || ''); redraw();
+  };
+  if ($('done-part')) $('done-part').onclick = () => { sync(); split.open = null; redraw(); };
+  $('add-part').onclick = () => {
+    sync(); const p = newPart(); const left = splitLeft();
+    if (left > 0) p.amount = String(left);
+    split.parts.push(p); split.open = split.parts.length - 1; redraw();
+    const el = $('p-amount'); if (el) el.scrollIntoView({ block: 'center' });
+  };
+  v.querySelectorAll('[data-open]').forEach(el => el.onclick = e => {
+    if (e.target.closest('[data-remove]')) return;
+    sync(); split.open = Number(el.dataset.open); redraw();
+  });
+  v.querySelectorAll('[data-remove]').forEach(el => el.onclick = e => {
+    e.stopPropagation(); sync();
+    const i = Number(el.dataset.remove);
+    split.parts.splice(i, 1);
+    if (split.fee_part >= split.parts.length) split.fee_part = 0;
+    split.open = null; redraw();
+  });
+  if ($('sms-fee')) $('sms-fee').onclick = () => { sync(); split.fee = (num(split.fee) + 0.5).toFixed(2); redraw(); };
+  $('s-fee').onchange = () => { sync(); redraw(); };
+
+  $('split-form').querySelectorAll('.chips').forEach(group => {
+    group.onclick = e => {
+      const btn = e.target.closest('.chip'); if (!btn) return;
+      sync();
+      const name = group.dataset.name, val = btn.dataset.v;
+      const p = split.parts[split.open];
+      if (name === 'mode') {
+        if (val !== split.mode) { split.mode = val; split.parts.forEach(q => { q.type = val === 'in' ? 'income' : 'expense'; q.advance = ''; }); }
+      } else if (name === 'account') {
+        if (val !== split.account) { split.account = val; split.parts.forEach(q => { q.pocket = pocketsOf(val)[0] ? pocketsOf(val)[0].id : ''; q.fund = fundFor(q.pocket); }); }
+      } else if (name === 'paid_to') {
+        split.paid_to = split.paid_to === val ? '' : val;
+        // A new part for this person starts with them as the person.
+        split.parts.forEach(q => { if (!q.person && val) q.person = val; });
+      } else if (name === 'fee_part') {
+        split.fee_part = Number(val);
+      } else if (p) {
+        if (name === 'pocket') { p.pocket = val; p.fund = fundFor(val); }
+        else if (name === 'ptype') {
+          p.type = val; const t = typeOf(val);
+          if (t.cat) p.category = t.cat; else if (t.person) p.category = '';
+          if (val !== 'payment') p.advance = '';
+        } else if (name === 'person') { p.person = p.person === val && !(typeOf(p.type).person || typeOf(p.type).who) ? '' : val; }
+        else p[name] = val;
+      }
+      redraw();
+    };
+  });
+
+  $('split-form').onsubmit = async e => { e.preventDefault(); sync(); await savePayment(); };
+  $('save-draft').onclick = async () => { sync(); await saveDraft(); };
+  if ($('del-draft')) $('del-draft').onclick = async () => {
+    if (!confirm('Delete this draft?')) return;
+    try {
+      await api('deleteDraft', { id: split.draftId });
+      state.drafts = state.drafts.filter(d => d.id !== split.draftId); store.setJSON('cacheDrafts', state.drafts);
+      toast('Draft deleted'); location.hash = '#home';
+    } catch (err) { toast('Not deleted: ' + err.message, true); }
+  };
+}
+
+function validateSplit() {
+  if (!(num(split.total) > 0)) return 'Type the total.';
+  if (!split.date) return 'Pick a date.';
+  if (!split.account) return 'Pick the account.';
+  for (let i = 0; i < split.parts.length; i++) {
+    const p = split.parts[i], t = typeOf(p.type), n = `Part ${i + 1}: `;
+    if (!(num(p.amount) > 0)) return n + 'enter an amount.';
+    if (!p.pocket) return n + 'pick the pocket.';
+    if (!p.fund) return n + 'pick the fund.';
+    if ((t.person || t.who) && !p.person) return n + 'pick the person.';
+    if (!t.person && !p.category) return n + 'pick a category.';
+    if (num(p.advance) < 0) return n + 'the advance can\'t be negative.';
+  }
+  const left = splitLeft();
+  if (left > 0) return `${money(left)} is not assigned yet. Add a part, or save as draft.`;
+  if (left < 0) return `The parts are ${money(-left)} more than the total.`;
+  return '';
+}
+
+function splitRows() {
+  const rows = [];
+  split.parts.forEach((p, i) => {
+    const amt = round2(num(p.amount));
+    const base = { date: split.date, currency: 'ZAR', rate: '', fund: p.fund, to_account: '', to_fund: '',
+      category: typeOf(p.type).person && !p.category ? '' : p.category, person: p.person || '',
+      paid_to: split.paid_to || '', source: 'app' };
+    rows.push(Object.assign({}, base, { type: p.type, amount: amt, amount_zar: amt, account: p.pocket,
+      fee: i === (split.fee_part || 0) && num(split.fee) ? round2(num(split.fee)) : '',
+      note: (p.note || split.note || '').trim() }));
+    const adv = round2(num(p.advance));
+    if (p.type === 'payment' && adv > 0) {
+      rows.push(Object.assign({}, base, { type: 'advance_used', amount: adv, amount_zar: adv, account: '', fee: '',
+        note: `Advance deducted from payment${p.note ? ' (' + p.note.trim() + ')' : ''}` }));
+    }
+  });
+  return rows;
+}
+
+const needsNewScript = e => /Unknown action/.test(e.message) ? 'This needs the updated Apps Script (see the update notes).' : e.message;
+
+async function savePayment() {
+  const msg = $('form-msg');
+  const problem = validateSplit();
+  if (problem) { msg.className = 'hint err'; msg.textContent = problem; return; }
+  const rows = splitRows();
+  const btn = $('save'); btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const res = await api('savePayment', { group_id: split.editGroup || '', replace_ids: split.editIds || [], draft_id: split.draftId || '', rows });
+    rows.forEach((r, i) => Object.assign(r, { id: res.ids[i], group_id: res.group_id, created_at: res.created_at }));
+    const old = new Set(split.editIds || []);
+    state.txs = state.txs.filter(t => !old.has(t.id) && !(split.editGroup && t.group_id === split.editGroup)).concat(rows);
+    store.setJSON('cacheTxs', state.txs);
+    if (split.draftId) { state.drafts = state.drafts.filter(d => d.id !== split.draftId); store.setJSON('cacheDrafts', state.drafts); }
+    const fb = store.getJSON('fundByAccount', {});
+    split.parts.forEach(p => { if (p.pocket && p.fund) fb[p.pocket] = p.fund; });
+    store.setJSON('fundByAccount', fb);
+    toast(`Saved ${money(num(split.total))}`);
+    split.ready = false;
+    location.hash = '#pay/' + encodeURIComponent(res.group_id);
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'Save';
+    msg.className = 'hint err'; msg.textContent = 'Not saved: ' + needsNewScript(e);
+  }
+}
+
+async function saveDraft() {
+  const msg = $('form-msg');
+  const data = {};
+  for (const k of ['mode', 'total', 'date', 'account', 'paid_to', 'note', 'fee', 'fee_part', 'parts', 'editGroup', 'editIds']) data[k] = split[k];
+  const btn = $('save-draft'); btn.disabled = true; btn.textContent = 'Saving draft…';
+  try {
+    const d = await api('saveDraft', { id: split.draftId || '', data: JSON.stringify(data) });
+    state.drafts = state.drafts.filter(x => x.id !== d.id).concat([d]); store.setJSON('cacheDrafts', state.drafts);
+    toast('Draft saved');
+    split.ready = false;
+    location.hash = '#home';
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'Save as draft';
+    msg.className = 'hint err'; msg.textContent = 'Draft not saved: ' + needsNewScript(e);
+  }
+}
+
+function draftInfo(d) {
+  let x = {};
+  try { x = JSON.parse(d.data); } catch (e) {}
+  const total = num(x.total), parts = x.parts || [];
+  const left = round2(total - parts.reduce((s, p) => s + num(p.amount), 0));
+  const who = x.paid_to ? nameOf(L.people(), x.paid_to) : (x.note || 'Split payment');
+  return { total, left, who, date: x.date };
+}
+
+// One payment, all parts.
+function renderPay(v, gid) {
+  gid = decodeURIComponent(gid || '');
+  const rows = groupRows(gid);
+  if (!rows.length) { v.innerHTML = '<header><h1>Payment</h1></header><p class="muted">Payment not found.</p><p><a class="link" href="#home">‹ Home</a></p>'; return; }
+  const cash = cashRows(rows), adv = rows.filter(t => t.type === 'advance_used');
+  const out = typeOf(cash[0].type).dir < 0;
+  const total = cash.reduce((s, t) => s + num(t.amount), 0);
+  const fee = cash.reduce((s, t) => s + num(t.fee), 0);
+  const b = balances();
+  const notes = [...new Set(cash.map(t => t.note || ''))];
+  const partLine = (t, i) => {
+    const type = typeOf(t.type);
+    const a = adv.find(x => x.person === t.person && x.fund === t.fund && t.type === 'payment');
+    const what = type.person || type.who ? (PART_LABEL[t.type] || type.label) : (nameOf(L.categories(), t.category) || PART_LABEL[t.type] || type.label);
+    const bits = [nameOf(L.accounts(), t.account), nameOf(L.funds(), t.fund), what, t.person ? nameOf(L.people(), t.person) : ''].filter(Boolean);
+    const owed = t.person ? (b.person[t.person + '|' + t.fund] || 0) : 0;
+    const back = t.type === 'bring_back' && owed > 0 ? Math.min(owed, num(t.amount)) : 0;
+    return `<div class="part"><div class="l"><div class="t1">${i + 1}. ${money(num(t.amount))}</div>
+      <div class="t2">${esc(bits.join(' · '))}${notes.length > 1 && t.note ? '<br>' + esc(t.note) : ''}
+      ${a ? `<br>earned ${money(num(t.amount) + num(a.amount))} − advance ${money(num(a.amount))}` : ''}
+      ${num(t.fee) ? `<br>bank fee ${money(num(t.fee))}` : ''}</div>
+      ${back ? `<button type="button" class="ghost" data-back="${esc(t.id)}" data-amt="${back}">${esc(nameOf(L.people(), t.person))} brought ${money(back)} → Cash ZAR</button>` : ''}
+      ${t.type === 'bring_back' && owed <= 0 ? '<div class="t2 ok">Brought back</div>' : ''}</div></div>`;
+  };
+  v.innerHTML = `
+    <header><h1>${out ? 'Payment' : 'Money in'}</h1></header>
+    <div class="card pad"><dl>
+      <dt>Total</dt><dd><b>${money(total)}</b>${fee ? ` + fee ${money(fee)}` : ''}</dd>
+      <dt>Date</dt><dd>${esc(niceDate(rows[0].date))}</dd>
+      <dt>${out ? 'From' : 'Into'}</dt><dd>${esc(nameOf(L.accounts(), topOf(cash[0].account)))}</dd>
+      ${rows[0].paid_to ? `<dt>${out ? 'Paid to' : 'Received from'}</dt><dd>${esc(nameOf(L.people(), rows[0].paid_to))}</dd>` : ''}
+      ${notes.length === 1 && notes[0] ? `<dt>Note</dt><dd>${esc(notes[0])}</dd>` : ''}
+    </dl></div>
+    <h2>${cash.length} part${cash.length === 1 ? '' : 's'}</h2>
+    <div class="card">${cash.map(partLine).join('')}</div>
+    <button class="ghost" id="edit">Edit payment</button>
+    <button class="ghost danger" id="del">Delete payment</button>
+    <button class="ghost" onclick="history.back()">Back</button>`;
+  $('edit').onclick = () => { split.ready = false; location.hash = '#split/edit/' + encodeURIComponent(gid); };
+  $('del').onclick = async () => {
+    if (!confirm(`Delete this payment and all ${rows.length} of its rows?`)) return;
+    try {
+      await api('deletePayment', { group_id: gid });
+      state.txs = state.txs.filter(t => t.group_id !== gid); store.setJSON('cacheTxs', state.txs);
+      toast('Deleted'); location.hash = '#home';
+    } catch (e) { toast('Not deleted: ' + needsNewScript(e), true); }
+  };
+  v.querySelectorAll('[data-back]').forEach(el => el.onclick = async () => {
+    const part = rows.find(t => t.id === el.dataset.back);
+    const amt = num(el.dataset.amt);
+    const cashAcc = L.accounts().find(a => a.id === 'cash-zar') ? 'cash-zar' : '';
+    if (!cashAcc || !confirm(`${nameOf(L.people(), part.person)} brought ${money(amt)} in cash? It goes into Cash ZAR.`)) return;
+    const tx = { date: localDay(new Date()), type: 'repayment', amount: amt, currency: 'ZAR', rate: '', amount_zar: amt,
+      account: cashAcc, to_account: '', fund: part.fund, to_fund: '', category: '', person: part.person, fee: '',
+      note: `Cash brought back (payment of ${part.date})`, source: 'app' };
+    el.disabled = true;
+    try {
+      const res = await api('addTransaction', tx);
+      tx.id = res.id; tx.created_at = new Date().toISOString();
+      state.txs.push(tx); store.setJSON('cacheTxs', state.txs);
+      toast(`${money(amt)} added to Cash ZAR`); renderPay(v, gid);
+    } catch (e) { el.disabled = false; toast('Not saved: ' + e.message, true); }
+  });
+}
+
 // ---------- Entry list and detail ----------
 
 const listFilter = { q: '', account: '', fund: '', person: '', month: '' };
 function renderList(v) {
   const months = [...new Set(state.txs.map(t => (t.date || '').slice(0, 7)).filter(Boolean))].sort().reverse();
   const opt = (arr, val, all) => `<option value="">${all}</option>` + arr.map(r => `<option value="${esc(r.id)}" ${r.id === val ? 'selected' : ''}>${esc(r.name)}</option>`).join('');
-  const rows = sortedTxs().filter(t => {
+  const showParts = !!(listFilter.account || listFilter.fund || listFilter.person);
+  const all = sortedTxs();
+  const rows = all.filter(t => {
     if (listFilter.account && t.account !== listFilter.account && t.to_account !== listFilter.account) return false;
     if (listFilter.fund && t.fund !== listFilter.fund && t.to_fund !== listFilter.fund) return false;
     if (listFilter.person && t.person !== listFilter.person) return false;
     if (listFilter.month && !(t.date || '').startsWith(listFilter.month)) return false;
     if (listFilter.q) {
-      const hay = [t.note, accName(t.account), nameOf(L.categories(), t.category), nameOf(L.people(), t.person), nameOf(L.funds(), t.fund), t.amount].join(' ').toLowerCase();
+      const hay = [t.note, accName(t.account), nameOf(L.categories(), t.category), nameOf(L.people(), t.person), nameOf(L.people(), t.paid_to), nameOf(L.funds(), t.fund), t.amount].join(' ').toLowerCase();
       if (!hay.includes(listFilter.q.toLowerCase())) return false;
     }
     return true;
   });
+  const items = listItems(rows, showParts);
   const accOpts = postable().map(a => ({ id: a.id, name: accName(a.id) }));
   v.innerHTML = `
     <header><h1>Entries</h1><button class="refresh" id="refresh">↻ Refresh</button></header>
@@ -542,8 +1016,8 @@ function renderList(v) {
       <select id="fl-fund">${opt(L.funds(), listFilter.fund, 'All funds')}</select>
       <select id="fl-person">${opt(L.people(), listFilter.person, 'All people')}</select>
     </div>
-    <p class="muted small">${rows.length} entr${rows.length === 1 ? 'y' : 'ies'}</p>
-    <div class="card">${rows.length ? rows.slice(0, 300).map(txRow).join('') : '<div class="empty small">Nothing found.</div>'}</div>`;
+    <p class="muted small">${items.length} entr${items.length === 1 ? 'y' : 'ies'}</p>
+    <div class="card">${items.length ? items.slice(0, 300).map(itemRow).join('') : '<div class="empty small">Nothing found.</div>'}</div>`;
   $('refresh').onclick = refresh;
   $('q').oninput = e => { listFilter.q = e.target.value; const pos = e.target.selectionStart; renderList(v); const q = $('q'); q.focus(); q.setSelectionRange(pos, pos); };
   ['month', 'account', 'fund', 'person'].forEach(k => $('fl-' + k).onchange = e => { listFilter[k] = e.target.value; renderList(v); });
@@ -554,7 +1028,9 @@ function renderTx(v, id) {
   id = decodeURIComponent(id || '');
   const t = state.txs.find(x => x.id === id);
   if (!t) { v.innerHTML = '<header><h1>Entry</h1></header><p class="muted">Entry not found.</p><p><a class="link" href="#home">‹ Home</a></p>'; return; }
+  if (t.group_id) { renderPay(v, encodeURIComponent(t.group_id)); return; }
   const type = typeOf(t.type), cur = accCurrency(t.account);
+  const canEdit = SPLIT_TYPES.has(type.id) && t.account && accCurrency(t.account) === 'ZAR' && fromAccounts().some(a => a.id === topOf(t.account));
   const item = (k, val) => val === '' || val == null ? '' : `<dt>${k}</dt><dd>${esc(val)}</dd>`;
   v.innerHTML = `
     <header><h1>${esc(type.label)}</h1></header>
@@ -571,8 +1047,10 @@ function renderTx(v, id) {
       ${num(t.fee) ? item('Bank fee', money(num(t.fee))) : ''}
       ${item('Note', t.note)}
     </dl></div>
+    ${canEdit ? '<button class="ghost" id="edit">Edit or split</button>' : ''}
     <button class="ghost danger" id="del">Delete entry</button>
     <button class="ghost" onclick="history.back()">Back</button>`;
+  if ($('edit')) $('edit').onclick = () => { split.ready = false; location.hash = '#split/edit/' + encodeURIComponent(t.id); };
   $('del').onclick = async () => {
     if (!confirm('Delete this entry?')) return;
     try {
@@ -616,9 +1094,14 @@ function renderSettings(v) {
 
 // ---------- Start ----------
 
-window.addEventListener('hashchange', () => { if (route()[0] === 'add') resetForm(); render(); window.scrollTo(0, 0); });
+window.addEventListener('hashchange', () => {
+  if (route()[0] === 'add') resetForm();
+  if (route()[0] === 'split') split.ready = false;
+  render(); window.scrollTo(0, 0);
+});
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && store.get('scriptUrl')) refresh(); });
 if (route()[0] === 'add') resetForm();
+if (route()[0] === 'split' && route()[1] !== 'draft' && route()[1] !== 'edit') location.replace('#add');
 render();
 if (store.get('scriptUrl')) refresh();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
