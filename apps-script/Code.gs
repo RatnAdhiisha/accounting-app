@@ -63,7 +63,12 @@ const TABS = {
   Transactions: {
     headers: ['id', 'date', 'type', 'amount', 'currency', 'rate', 'amount_zar',
               'account', 'to_account', 'fund', 'to_fund', 'category', 'person',
-              'fee', 'note', 'receipt_url', 'created_at', 'source'],
+              'fee', 'note', 'receipt_url', 'created_at', 'source', 'group_id', 'paid_to'],
+    rows: [],
+  },
+  // Unfinished split payments. "data" holds the app's form as text.
+  Drafts: {
+    headers: ['id', 'updated_at', 'data'],
     rows: [],
   },
 };
@@ -99,6 +104,48 @@ function readTab_(name) {
     Object.fromEntries(headers.map((h, i) => [h, r[i] instanceof Date ? r[i].toISOString() : r[i]])));
 }
 
+// The tab, created with its headers if it doesn't exist yet.
+function sheet_(name) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(name);
+  if (!sh) sh = ss.insertSheet(name);
+  if (sh.getLastRow() === 0) {
+    const h = TABS[name].headers;
+    sh.getRange(1, 1, 1, h.length).setValues([h]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+// The tab's headers, adding any missing ones at the end (older sheets keep their columns and rows).
+function headers_(sh, want) {
+  let h = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  const missing = want.filter(x => !h.includes(x));
+  if (missing.length) {
+    sh.getRange(1, h.length + 1, 1, missing.length).setValues([missing]).setFontWeight('bold');
+    h = h.concat(missing);
+  }
+  return h;
+}
+
+function appendRows_(sh, headers, objs) {
+  if (!objs.length) return;
+  const values = objs.map(t => headers.map(h => t[h] === undefined ? '' : t[h]));
+  sh.getRange(sh.getLastRow() + 1, 1, values.length, headers.length).setValues(values);
+}
+
+// Deletes every row for which test(row object) is true. Returns how many.
+function deleteRowsWhere_(sh, test) {
+  const data = sh.getDataRange().getValues();
+  const h = data[0];
+  let n = 0;
+  for (let i = data.length - 1; i >= 1; i--) {
+    const row = Object.fromEntries(h.map((k, j) => [k, data[i][j]]));
+    if (test(row)) { sh.deleteRow(i + 1); n++; }
+  }
+  return n;
+}
+
 function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
@@ -117,6 +164,7 @@ function doGet(e) {
         Accounts: readTab_('Accounts'), Funds: readTab_('Funds'),
         Categories: readTab_('Categories'), People: readTab_('People') } });
       case 'transactions': return json_({ ok: true, data: readTab_('Transactions') });
+      case 'drafts': return json_({ ok: true, data: readTab_('Drafts') });
       default: throw new Error('Unknown action');
     }
   } catch (err) {
@@ -146,6 +194,44 @@ function doPost(e) {
           if (ids[i][0] === req.data.id) { sh.deleteRow(i + 1); return json_({ ok: true, data: { id: req.data.id } }); }
         }
         throw new Error('Entry not found');
+      }
+      // A payment with one or more parts: one row per part, all with the same group_id.
+      // When editing, the old rows are removed only after the new ones are written.
+      case 'savePayment': {
+        const d = req.data;
+        if (!d.rows || !d.rows.length) throw new Error('No parts to save');
+        const sh = sheet_('Transactions');
+        const headers = headers_(sh, TABS.Transactions.headers);
+        const group = d.group_id || Utilities.getUuid();
+        const now = new Date().toISOString();
+        const rows = d.rows.map(r => Object.assign({}, r, { id: Utilities.getUuid(), group_id: group, created_at: now }));
+        appendRows_(sh, headers, rows);
+        const keep = new Set(rows.map(r => r.id));
+        const replaceIds = new Set(d.replace_ids || []);
+        deleteRowsWhere_(sh, r => !keep.has(r.id) &&
+          ((d.group_id && r.group_id === d.group_id) || replaceIds.has(r.id)));
+        if (d.draft_id) deleteRowsWhere_(sheet_('Drafts'), r => r.id === d.draft_id);
+        return json_({ ok: true, data: { group_id: group, ids: rows.map(r => r.id), created_at: now } });
+      }
+      case 'deletePayment': {
+        const g = req.data.group_id;
+        if (!g) throw new Error('No payment given');
+        const n = deleteRowsWhere_(sheet_('Transactions'), r => r.group_id === g);
+        if (!n) throw new Error('Payment not found');
+        return json_({ ok: true, data: { group_id: g, deleted: n } });
+      }
+      case 'saveDraft': {
+        const sh = sheet_('Drafts');
+        const headers = headers_(sh, TABS.Drafts.headers);
+        const id = req.data.id || Utilities.getUuid();
+        const row = { id, updated_at: new Date().toISOString(), data: req.data.data };
+        deleteRowsWhere_(sh, r => r.id === id);
+        appendRows_(sh, headers, [row]);
+        return json_({ ok: true, data: row });
+      }
+      case 'deleteDraft': {
+        deleteRowsWhere_(sheet_('Drafts'), r => r.id === req.data.id);
+        return json_({ ok: true, data: { id: req.data.id } });
       }
       default: throw new Error('Unknown action');
     }
