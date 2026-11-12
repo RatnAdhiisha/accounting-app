@@ -1,7 +1,7 @@
 // Accounting app: quick entry, split payments, balances home screen, entry list, new people.
 'use strict';
 
-const VERSION = '0.6.3';
+const VERSION = '0.6.4';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -98,6 +98,8 @@ const TYPES = [
   { id: 'repayment', label: 'Got back',  dir: +1, person: -1, hint: 'Someone pays you back. Their debt goes down.' },
   { id: 'borrow',    label: 'Borrowed',  dir: +1, person: -1, hint: 'You borrow money. You will owe them.' },
   { id: 'payback',   label: 'Paid back', dir: -1, person: +1, hint: 'You pay back what you borrowed.' },
+  { id: 'paid_for_me', label: 'Paid for me', dir: -1, person: -1, noCash: true, cat: 'groceries',
+    hint: 'Someone bought something for you with their own money. You owe them, and the cost counts as spending. No cash moves.' },
   { id: 'opening',   label: 'Opening',   dir: +1, hint: 'Starting balance of an account, or what a person owes a fund (minus if the fund owes them).' },
   // Used by the sheet import; not offered as buttons.
   { id: 'exchange',      label: 'Exchange',      dir: 0, hidden: true },
