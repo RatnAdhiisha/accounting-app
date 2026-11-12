@@ -17,6 +17,8 @@ funds on purpose, so only overspending there counts as a debt. No Apps Script up
 
 **Spent advance**: when someone brings the receipt for an advance, enter what it really cost (no cash moves, their debt goes down, the cost gets a category). Change they give back is a "Got back" entry.
 
+**Paid for me**: someone bought something for you with their own money (e.g. Indrajit buys carrots). One entry, no cash: you owe them, and the cost counts as spending in its category. Later pay them back with "Paid back".
+
 ## New people (version 0.5)
 
 Every person list has a **+ New** chip. Type a name (the app warns about names that look like
