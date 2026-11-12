@@ -7,6 +7,14 @@ Phone-first home-screen web app for personal and fund accounting.
 
 No financial data is stored in this repository. The app keeps the Apps Script link and secret key only on the device.
 
+## Funds that owe each other (version 0.6)
+
+Each account belongs to one fund (Dada Ratna pocket and Cash ZAR: Personal; Dada Guna pocket: Dada Guna;
+Agricoop Cash: Agricoop). When another fund's money is spent from an account (an advance for Dada Guna
+paid from Cash ZAR), the home screen shows "Dada Guna owes you (Personal)". **Pay back** opens a transfer
+from that fund's pocket that keeps the fund the same, which settles it. The Projects pocket holds several
+funds on purpose, so only overspending there counts as a debt. No Apps Script update is needed.
+
 ## New people (version 0.5)
 
 Every person list has a **+ New** chip. Type a name (the app warns about names that look like

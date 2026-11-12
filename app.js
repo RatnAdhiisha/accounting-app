@@ -1,7 +1,7 @@
 // Accounting app: quick entry, split payments, balances home screen, entry list, new people.
 'use strict';
 
-const VERSION = '0.5';
+const VERSION = '0.6';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -185,6 +185,59 @@ function owedByPerson(person) {
   return out;
 }
 
+// ---------- Funds that owe each other ----------
+// Each account belongs to one fund ("whose account"). When another fund's money is spent from it
+// (Dada Guna's advance paid from your Cash ZAR), that fund owes the account's fund. When another
+// fund's money is kept in it, the account's fund owes that fund. The Projects pocket holds several
+// funds on purpose, so money kept there is not a debt; only overspending there is.
+const ACCOUNT_FUND = Object.assign({ 'ajbulk-cash': 'ventures' }, DEFAULT_FUND);
+const SHARED_ACCOUNTS = new Set(['tyme-transit']);
+// Where each fund's money normally lives, for settling up.
+const FUND_ACCOUNT = { personal: 'tyme-ratna', guna: 'tyme-guna', feeding: 'tyme-transit', agricoop: 'agricoop-cash' };
+
+// Money of each fund in each account, in rand: { 'cash-zar|guna': -100, ... }.
+function cellEffects(t) {
+  const type = typeOf(t.type);
+  const amt = num(t.amount), fee = num(t.fee), rate = num(t.rate) || 1;
+  const zar = num(t.amount_zar) || (accCurrency(t.account) === 'ZAR' ? amt : amt * rate);
+  const out = {};
+  const add = (a, f, v) => { if (a && f) out[a + '|' + f] = (out[a + '|' + f] || 0) + v; };
+  if (type.id === 'fund_transfer') { add(t.account, t.fund, -zar - fee); add(t.account, t.to_fund, zar); }
+  else if (type.id === 'transfer' || type.id === 'exchange') {
+    add(t.account, t.fund, -zar - fee); add(t.to_account || t.account, t.to_fund || t.fund, zar);
+  } else if (type.id === 'opening') add(t.account, t.fund, zar);
+  else add(t.account, t.fund, type.dir * zar - fee);
+  return out;
+}
+
+// What one fund owes another (netted), e.g. [{ from: 'guna', to: 'personal', amount: 100 }].
+function fundDebts(txs) {
+  const cells = {};
+  for (const t of txs) { const c = cellEffects(t); for (const k in c) cells[k] = (cells[k] || 0) + c[k]; }
+  const pos = {}; // + = other funds owe this fund
+  const add = (f, v) => { pos[f] = (pos[f] || 0) + v; };
+  for (const k in cells) {
+    const [a, f] = k.split('|'), x = cells[k], home = ACCOUNT_FUND[a];
+    if (!home || f === home || Math.abs(x) < 0.005) continue;
+    if (SHARED_ACCOUNTS.has(a) && x > 0) continue;
+    add(f, x); add(home, -x);
+  }
+  const debtors = [], creditors = [];
+  for (const f in pos) {
+    const x = Math.round(pos[f] * 100) / 100;
+    if (x < 0) debtors.push({ f, x: -x }); else if (x > 0) creditors.push({ f, x });
+  }
+  debtors.sort((a, b) => b.x - a.x); creditors.sort((a, b) => b.x - a.x);
+  const out = [];
+  for (const d of debtors) for (const c of creditors) {
+    const m = Math.round(Math.min(d.x, c.x) * 100) / 100;
+    if (m <= 0) continue;
+    out.push({ from: d.f, to: c.f, amount: m });
+    d.x -= m; c.x -= m;
+  }
+  return out;
+}
+
 // Latest rate used for a currency, to show foreign cash in rand.
 function lastRate(cur) {
   const accs = L.accounts().filter(a => a.currency === cur).map(a => a.id);
@@ -287,7 +340,6 @@ function renderHome(v) {
   }).join('');
 
   // Each debt belongs to a fund: "School owes Dada K's feeding program R1,049".
-  const fundLabel = fid => !fid ? 'no fund set' : fid === 'personal' ? 'you (Personal)' : nameOf(L.funds(), fid);
   const debtLine = (x, fid) => x > 0 ? `owes ${fundLabel(fid)}` : `${fundLabel(fid)} owes them`;
   const owed = L.people().map(p => ({ p, o: b.owed[p.id] })).filter(r => r.o && Object.keys(r.o.funds).length)
     .sort((a, b) => b.o.total - a.o.total);
@@ -300,6 +352,13 @@ function renderHome(v) {
     return `<div class="row parent"><span class="name">${esc(p.name)} <span class="muted small">${o.total >= 0 ? 'owes in all' : 'is owed in all'}</span></span><span class="amt ${o.total < 0 ? 'neg' : ''}">${money(Math.abs(o.total))}</span></div>` +
       parts.map(([fid, x]) => `<div class="row sub"><span class="name">${esc(debtLine(x, fid))}</span><span class="amt ${x < 0 ? 'neg' : ''}">${money(Math.abs(x))}</span></div>`).join('');
   }).join('') : '<div class="empty small">Nobody owes anything.</div>';
+  // Funds that owe each other, with a button to pay it back.
+  const fundDebtRows = fundDebts(state.txs).map(d => {
+    const fromAcc = FUND_ACCOUNT[d.from], toAcc = FUND_ACCOUNT[d.to];
+    const can = fromAcc && toAcc && postable().some(a => a.id === fromAcc) && postable().some(a => a.id === toAcc);
+    return `<div class="row"><span class="name">${esc(nameOf(L.funds(), d.from))} <span class="muted small">owes ${esc(fundLabel(d.to))}</span></span>
+      <span class="amt">${money(d.amount)}${can ? `<div><button class="link" data-settle="${esc(d.from)}|${esc(d.to)}|${d.amount}">Pay back ›</button></div>` : ''}</span></div>`;
+  }).join('');
   const all = Object.values(b.person);
   const owesMe = all.filter(x => x > 0).reduce((s, x) => s + x, 0);
   const iOwe = all.filter(x => x < 0).reduce((s, x) => s - x, 0);
@@ -318,12 +377,21 @@ function renderHome(v) {
     ${drafts.length ? `<h2>Drafts to finish</h2><div class="card">${drafts.map(d => `<div class="tx" data-draft="${esc(d.id)}"><div class="l"><div class="t1">${esc(d.who)}</div><div class="t2">${esc(niceDate(d.date))} · ${d.left ? money(d.left) + ' left to assign' : 'ready to save'}</div></div><div class="amt">${money(d.total)}</div></div>`).join('')}</div>` : ''}
     <h2>Accounts</h2><div class="card">${accRows}</div>
     <h2>Funds (whose money)</h2><div class="card">${fundRows}</div>
+    ${fundDebtRows ? `<h2>Funds that owe each other</h2><div class="card">${fundDebtRows}</div>
+      <div class="hint">When one fund's money pays for another fund, the other fund owes it back.</div>` : ''}
     <h2>People</h2><div class="card">${peopleRows}</div>
     <h2>Recent</h2><div class="card">${recent.length ? recent.map(itemRow).join('') : '<div class="empty small">No entries yet. Tap + to add one.</div>'}</div>
     ${recent.length ? '<p><a class="link" href="#list">All entries ›</a></p>' : ''}
   `;
   $('refresh').onclick = refresh;
   bindTxRows(v);
+  v.querySelectorAll('[data-settle]').forEach(el => el.onclick = () => {
+    const [from, to, amount] = el.dataset.settle.split('|');
+    formSeed = { type: 'transfer', amount, account: FUND_ACCOUNT[from], to_account: FUND_ACCOUNT[to], fund: from,
+      to_fund: '', moveFund: false, category: '', person: '', fundFrom: '', fee: '',
+      note: `${nameOf(L.funds(), from)} pays back ${nameOf(L.funds(), to)}`, settle: { from, to } };
+    location.hash = '#add';
+  });
   v.querySelectorAll('[data-draft]').forEach(el => el.onclick = () => { location.hash = '#split/draft/' + encodeURIComponent(el.dataset.draft); });
 }
 
@@ -389,6 +457,8 @@ function bindTxRows(v) {
 // ---------- Quick entry ----------
 
 const form = {}; // current form values
+let formSeed = null; // values to start the next new entry with (e.g. "Pay back" on the home screen)
+function seedForm() { if (formSeed) { Object.assign(form, formSeed); formSeed = null; } }
 
 function resetForm(keepType) {
   const last = store.getJSON('lastEntry', {});
@@ -398,7 +468,7 @@ function resetForm(keepType) {
   Object.assign(form, {
     type, amount: '', account, to_account: '', fund: fundFor(account), to_fund: '',
     category: (last.cats || {})[type] || typeOf(type).cat || '', person: '', note: '', date: localDay(new Date()),
-    fee: '', rate: '', moveFund: false, fundFrom: '',
+    fee: '', rate: '', moveFund: false, fundFrom: '', settle: null,
   });
 }
 function fundFor(account) {
@@ -451,6 +521,7 @@ function renderAdd(v) {
       <div class="lbl">${isTransfer && form.moveFund ? 'From fund' : 'Fund (whose money)'}</div>
       ${chips('fund', funds, form.fund, isOpening ? { none: 'None' } : {})}
       ${form.fundFrom && form.fundFrom === form.person ? `<div class="hint">Last used with ${esc(nameOf(L.people(), form.person))}.</div>` : ''}
+      ${fundNote()}
       ${isTransfer ? `<div class="hint"><label style="display:flex;gap:8px;align-items:center;margin:0;color:inherit"><input type="checkbox" id="f-movefund" style="width:auto" ${form.moveFund ? 'checked' : ''}> Money also changes fund</label></div>
         ${form.moveFund ? `<div class="lbl">To fund</div>${chips('to_fund', funds.filter(f => f.id !== form.fund), form.to_fund)}` : ''}` : ''}
 
@@ -522,6 +593,18 @@ function renderAdd(v) {
     location.hash = '#split';
   };
 }
+
+// A line under the fund when the money belongs to another fund than the account's own.
+function fundNote() {
+  const type = typeOf(form.type), home = ACCOUNT_FUND[form.account];
+  if (form.settle) return `<div class="hint">Keep the fund as ${esc(nameOf(L.funds(), form.settle.from))}: this pays back what it owes ${esc(fundLabel(form.settle.to))}.</div>`;
+  if (!form.account || !form.fund || !home || form.fund === home || type.id === 'opening') return '';
+  const f = esc(nameOf(L.funds(), form.fund)), h = esc(fundLabel(home));
+  if (type.id === 'transfer') return '';
+  if (type.dir < 0) return SHARED_ACCOUNTS.has(form.account) ? '' : `<div class="hint">Paid with ${esc(nameOf(L.funds(), home))} money, so ${f} will owe ${h}. You can pay it back from the home screen.</div>`;
+  return SHARED_ACCOUNTS.has(form.account) ? '' : `<div class="hint">${f} money kept here, so ${h} will owe ${f} until it is moved.</div>`;
+}
+const fundLabel = fid => !fid ? 'no fund set' : fid === 'personal' ? 'you (Personal)' : nameOf(L.funds(), fid);
 
 function validate() {
   const type = typeOf(form.type);
@@ -1251,7 +1334,7 @@ function renderSettings(v) {
 // ---------- Start ----------
 
 window.addEventListener('hashchange', () => {
-  if (route()[0] === 'add') resetForm();
+  if (route()[0] === 'add') { resetForm(); seedForm(); }
   if (route()[0] === 'split') split.ready = false;
   render(); window.scrollTo(0, 0);
 });
