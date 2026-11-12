@@ -1,7 +1,7 @@
 // Accounting app: quick entry, split payments, balances home screen, entry list, new people.
 'use strict';
 
-const VERSION = '0.6';
+const VERSION = '0.6.1';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -103,7 +103,9 @@ const TYPES = [
   { id: 'exchange',      label: 'Exchange',      dir: 0, hidden: true },
   { id: 'fund_transfer', label: 'Fund transfer', dir: 0, hidden: true },
   // Part of a split payment: an advance taken earlier, now deducted from the payment. No cash moves.
-  { id: 'advance_used',  label: 'Advance deducted', dir: -1, person: -1, hidden: true },
+  // Also a button: the receipt for an advance (what it really cost). No cash moves; their debt goes down.
+  { id: 'advance_used',  label: 'Spent advance', dir: -1, person: -1, noCash: true, cat: 'expenses',
+    hint: 'They bring the receipt for an advance. Enter what it really cost; their debt goes down. Enter change they give back with "Got back".' },
 ];
 const typeOf = id => TYPES.find(t => t.id === id) || TYPES[0];
 const isMove = t => ['transfer', 'exchange', 'fund_transfer'].includes(typeOf(t.type).id);
@@ -510,8 +512,8 @@ function renderAdd(v) {
 
       ${type.person || type.who || isOpening ? `<div class="lbl">Person${isOpening ? ' (only for a person\'s opening balance)' : ''}</div>${chips('person', people, form.person, isOpening ? { none: 'No one', add: true } : { add: true })}` : ''}
 
-      <div class="lbl">${isTransfer ? 'From' : 'Account'}</div>
-      ${chips('account', accs, form.account, isOpening ? { none: 'None' } : type.person ? { none: 'No cash' } : {})}
+      ${type.noCash ? '' : `<div class="lbl">${isTransfer ? 'From' : 'Account'}</div>
+      ${chips('account', accs, form.account, isOpening ? { none: 'None' } : type.person ? { none: 'No cash' } : {})}`}
 
       ${isTransfer ? `<div class="lbl">To</div>${chips('to_account', accs.filter(a => a.id !== form.account), form.to_account)}` : ''}
 
@@ -534,7 +536,7 @@ function renderAdd(v) {
 
       <div class="two">
         <div><label for="f-date">Date</label><input id="f-date" type="date" value="${esc(form.date)}"></div>
-        ${!isOpening ? `<div><label for="f-fee">Bank fee (R)</label><input id="f-fee" inputmode="decimal" placeholder="0.00" value="${esc(form.fee)}"></div>` : ''}
+        ${!isOpening && !type.noCash ? `<div><label for="f-fee">Bank fee (R)</label><input id="f-fee" inputmode="decimal" placeholder="0.00" value="${esc(form.fee)}"></div>` : ''}
       </div>
       ${!isOpening && isTyme ? `<button type="button" class="link" id="sms-fee">+ R0.50 SMS fee</button>` : ''}
 
@@ -616,7 +618,9 @@ function validate() {
     if (form.account && !form.fund) return 'Pick the fund this money belongs to.';
     return '';
   }
+  if (type.noCash) form.account = '';
   if (!form.account && !type.person) return 'Pick an account.';
+  if (type.noCash && !form.category) return 'Pick a category.';
   if (!form.fund) return 'Pick a fund.';
   if (type.id === 'transfer') {
     if (!form.to_account && !(form.moveFund && form.to_fund)) return 'Pick where the money goes.';

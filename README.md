@@ -15,6 +15,8 @@ paid from Cash ZAR), the home screen shows "Dada Guna owes you (Personal)". **Pa
 from that fund's pocket that keeps the fund the same, which settles it. The Projects pocket holds several
 funds on purpose, so only overspending there counts as a debt. No Apps Script update is needed.
 
+**Spent advance**: when someone brings the receipt for an advance, enter what it really cost (no cash moves, their debt goes down, the cost gets a category). Change they give back is a "Got back" entry.
+
 ## New people (version 0.5)
 
 Every person list has a **+ New** chip. Type a name (the app warns about names that look like
