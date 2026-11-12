@@ -233,6 +233,24 @@ function doPost(e) {
         deleteRowsWhere_(sheet_('Drafts'), r => r.id === req.data.id);
         return json_({ ok: true, data: { id: req.data.id } });
       }
+      // A new person from the app. The id is made from the name and never changes;
+      // the name can be edited in the sheet later.
+      case 'addPerson': {
+        const name = String(req.data.name || '').trim();
+        if (!name) throw new Error('No name given');
+        const sh = sheet_('People');
+        const headers = headers_(sh, TABS.People.headers);
+        const people = readTab_('People');
+        const squash = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+        const same = people.find(p => squash(p.name) === squash(name));
+        if (same) throw new Error(same.name + ' is already in the list');
+        const base = squash(name) || 'person';
+        let id = base, n = 2;
+        while (people.some(p => String(p.id) === id)) id = base + n++;
+        const row = { id, name, active: true, note: String(req.data.note || '').trim() };
+        appendRows_(sh, headers, [row]);
+        return json_({ ok: true, data: row });
+      }
       default: throw new Error('Unknown action');
     }
   } catch (err) {

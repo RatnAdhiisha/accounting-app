@@ -108,3 +108,11 @@ dl { margin:0; } dt { color:var(--muted); font-size:13px; margin-top:10px; } dd 
 .part .x { background:none; border:0; color:var(--muted); font-size:24px; line-height:1; padding:0 4px; width:auto; }
 .small-amt span { font-size:20px; } .small-amt input { font-size:22px; }
 .link.danger { color:var(--bad); }
+
+/* New person sheet */
+.chip.add { border-style:dashed; color:var(--accent); }
+.sheet-bg { position:fixed; inset:0; z-index:50; background:rgba(0,0,0,.4); display:flex; align-items:flex-end; justify-content:center; }
+.sheet { background:var(--bg); width:100%; max-width:640px; max-height:92vh; overflow-y:auto; -webkit-overflow-scrolling:touch;
+  border-radius:16px 16px 0 0; padding:16px 16px calc(16px + env(safe-area-inset-bottom)); }
+.sheet h3 { margin:0 0 10px; font-size:18px; }
+.sheet button.primary, .sheet button.ghost { width:100%; margin-top:10px; }

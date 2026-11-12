@@ -1,7 +1,7 @@
-// Accounting app: quick entry, split payments, balances home screen, entry list.
+// Accounting app: quick entry, split payments, balances home screen, entry list, new people.
 'use strict';
 
-const VERSION = '0.4';
+const VERSION = '0.5';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -398,7 +398,7 @@ function resetForm(keepType) {
   Object.assign(form, {
     type, amount: '', account, to_account: '', fund: fundFor(account), to_fund: '',
     category: (last.cats || {})[type] || typeOf(type).cat || '', person: '', note: '', date: localDay(new Date()),
-    fee: '', rate: '', moveFund: false,
+    fee: '', rate: '', moveFund: false, fundFrom: '',
   });
 }
 function fundFor(account) {
@@ -408,7 +408,8 @@ function fundFor(account) {
 
 function chips(name, items, value, opts = {}) {
   return `<div class="chips" data-name="${name}">${opts.none ? `<button type="button" class="chip ${!value ? 'on' : ''}" data-v="">${esc(opts.none)}</button>` : ''}${
-    items.map(i => `<button type="button" class="chip ${i.main ? 'main' : ''} ${i.id === value ? 'on' : ''}" data-v="${esc(i.id)}">${esc(i.label || i.name)}</button>`).join('')}</div>`;
+    items.map(i => `<button type="button" class="chip ${i.main ? 'main' : ''} ${i.id === value ? 'on' : ''}" data-v="${esc(i.id)}">${esc(i.label || i.name)}</button>`).join('')}${
+    opts.add ? '<button type="button" class="chip add" data-add="1">+ New</button>' : ''}</div>`;
 }
 
 function renderAdd(v) {
@@ -437,7 +438,7 @@ function renderAdd(v) {
       <div class="amount-wrap"><span>${SYMBOL[cur] || cur}</span>
         <input id="f-amount" inputmode="decimal" enterkeyhint="done" placeholder="0.00" value="${esc(form.amount)}"></div>
 
-      ${type.person || type.who || isOpening ? `<div class="lbl">Person${isOpening ? ' (only for a person\'s opening balance)' : ''}</div>${chips('person', people, form.person, isOpening ? { none: 'No one' } : {})}` : ''}
+      ${type.person || type.who || isOpening ? `<div class="lbl">Person${isOpening ? ' (only for a person\'s opening balance)' : ''}</div>${chips('person', people, form.person, isOpening ? { none: 'No one', add: true } : { add: true })}` : ''}
 
       <div class="lbl">${isTransfer ? 'From' : 'Account'}</div>
       ${chips('account', accs, form.account, isOpening ? { none: 'None' } : type.person ? { none: 'No cash' } : {})}
@@ -449,12 +450,13 @@ function renderAdd(v) {
 
       <div class="lbl">${isTransfer && form.moveFund ? 'From fund' : 'Fund (whose money)'}</div>
       ${chips('fund', funds, form.fund, isOpening ? { none: 'None' } : {})}
+      ${form.fundFrom && form.fundFrom === form.person ? `<div class="hint">Last used with ${esc(nameOf(L.people(), form.person))}.</div>` : ''}
       ${isTransfer ? `<div class="hint"><label style="display:flex;gap:8px;align-items:center;margin:0;color:inherit"><input type="checkbox" id="f-movefund" style="width:auto" ${form.moveFund ? 'checked' : ''}> Money also changes fund</label></div>
         ${form.moveFund ? `<div class="lbl">To fund</div>${chips('to_fund', funds.filter(f => f.id !== form.fund), form.to_fund)}` : ''}` : ''}
 
       ${!isTransfer && !isOpening ? `<div class="lbl">Category</div>${chips('category', cats, form.category, type.person ? { none: 'None' } : {})}` : ''}
 
-      ${!type.person && !type.who && !isOpening && !isTransfer ? `<div class="lbl">Person (optional)</div>${chips('person', people, form.person, { none: 'No one' })}` : ''}
+      ${!type.person && !type.who && !isOpening && !isTransfer ? `<div class="lbl">Person (optional)</div>${chips('person', people, form.person, { none: 'No one', add: true })}` : ''}
 
       <label for="f-note">Note</label>
       <input id="f-note" placeholder="What was it?" value="${esc(form.note)}" enterkeyhint="done">
@@ -482,20 +484,32 @@ function renderAdd(v) {
       const btn = e.target.closest('.chip'); if (!btn) return;
       sync();
       const name = group.dataset.name, val = btn.dataset.v;
+      if (btn.dataset.add) {
+        openNewPerson(form.fund, pid => { form.person = pid; usePersonFund(); renderAdd(v); });
+        return;
+      }
       if (name === 'type') {
         form.type = val;
         const cats = (store.getJSON('lastEntry', {}).cats) || {};
         form.category = cats[val] || typeOf(val).cat || '';
         if (val === 'opening') { form.fee = ''; }
       } else if (name === 'account') {
-        form.account = val; if (val) form.fund = fundFor(val);
+        form.account = val;
+        if (val && !(form.fundFrom && form.fundFrom === form.person)) form.fund = fundFor(val);
         if (form.to_account === val) form.to_account = '';
       } else {
         form[name] = (form[name] === val && name !== 'fund') ? '' : val;
+        if (name === 'fund') form.fundFrom = '';
+        if (name === 'person') usePersonFund();
       }
       renderAdd(v);
     };
   });
+  // Picking a person fills in the fund last used with them (you can still change it).
+  function usePersonFund() {
+    const pf = form.person && personFund(form.person);
+    if (pf) { form.fund = pf; form.fundFrom = form.person; } else form.fundFrom = '';
+  }
   if ($('f-movefund')) $('f-movefund').onchange = e => { sync(); form.moveFund = e.target.checked; form.to_fund = ''; renderAdd(v); };
   if ($('sms-fee')) $('sms-fee').onclick = () => { $('f-fee').value = (num($('f-fee').value) + 0.5).toFixed(2); };
   f.onsubmit = async e => { e.preventDefault(); sync(); await saveEntry(); };
@@ -558,7 +572,7 @@ async function saveEntry() {
     last.type = type.id; last.account = form.account; last.cats = last.cats || {};
     if (tx.category) last.cats[type.id] = tx.category;
     store.setJSON('lastEntry', last);
-    if (form.account && form.fund) { const fb = store.getJSON('fundByAccount', {}); fb[form.account] = form.fund; store.setJSON('fundByAccount', fb); }
+    if (form.account && form.fund && !form.fundFrom) { const fb = store.getJSON('fundByAccount', {}); fb[form.account] = form.fund; store.setJSON('fundByAccount', fb); }
     toast(`Saved ${money(amt, cur)}`);
     resetForm(type.id);
     location.hash = '#home';
@@ -595,7 +609,8 @@ function newPart() {
   const used = split.parts ? split.parts.map(p => p.pocket) : [];
   const pocket = (pockets.find(p => !used.includes(p.id)) || pockets[0] || {}).id || '';
   const type = split.mode === 'in' ? 'income' : 'expense';
-  return { type, amount: '', pocket, fund: fundFor(pocket), category: '', person: split.paid_to || '', advance: '', note: '' };
+  const pf = split.paid_to ? personFund(split.paid_to) : '';
+  return { type, amount: '', pocket, fund: pf || fundFor(pocket), fundFrom: pf ? split.paid_to : '', category: '', person: split.paid_to || '', advance: '', note: '' };
 }
 
 function startSplit(args) {
@@ -706,9 +721,10 @@ function renderSplit(v, args) {
       ${pockets.length > 1 ? `<div class="lbl">Pocket</div>${chips('pocket', pockets, p.pocket)}` : ''}
       <div class="lbl">What</div>${chips('ptype', typeItems, p.type)}
       <div class="hint">${esc(type.hint || '')}</div>
-      <div class="lbl">Person${type.person || type.who ? '' : ' (optional)'}</div>${chips('person', people, p.person, type.person || type.who ? {} : { none: 'No one' })}
+      <div class="lbl">Person${type.person || type.who ? '' : ' (optional)'}</div>${chips('person', people, p.person, type.person || type.who ? { add: true } : { none: 'No one', add: true })}
       ${type.person ? '' : `<div class="lbl">Category</div>${chips('category', cats, p.category)}`}
       <div class="lbl">Fund (whose money)</div>${chips('fund', funds, p.fund)}
+      ${p.fundFrom && p.fundFrom === p.person ? `<div class="hint">Last used with ${esc(nameOf(L.people(), p.person))}.</div>` : ''}
       ${showAdv ? `<label for="p-advance">Advance deducted (R)</label>
         <input id="p-advance" inputmode="decimal" placeholder="0.00" value="${esc(p.advance)}">
         <div class="hint">${owed > 0 ? `${esc(nameOf(L.people(), p.person))} owes this fund ${money(owed)}. ` : ''}Earned = paid now + advance.${owed > 0 && !num(p.advance) ? ` <button type="button" class="link" id="use-adv">Deduct ${money(owed)}</button>` : ''}</div>` : ''}
@@ -726,7 +742,7 @@ function renderSplit(v, args) {
       <label for="s-total">Total ${out ? 'paid' : 'received'}</label>
       <div class="amount-wrap"><span>R</span><input id="s-total" inputmode="decimal" enterkeyhint="done" placeholder="0.00" value="${esc(split.total)}"></div>
       <div class="lbl">${out ? 'From' : 'Into'}</div>${chips('account', accs, split.account)}
-      <div class="lbl">${out ? 'Paid to' : 'Received from'} (optional)</div>${chips('paid_to', people, split.paid_to, { none: 'No one' })}
+      <div class="lbl">${out ? 'Paid to' : 'Received from'} (optional)</div>${chips('paid_to', people, split.paid_to, { none: 'No one', add: true })}
       <div id="left-box"></div>
       <div class="parts">${split.parts.map(partHtml).join('')}</div>
       <button type="button" class="ghost" id="add-part">+ Add part</button>
@@ -790,30 +806,43 @@ function renderSplit(v, args) {
     group.onclick = e => {
       const btn = e.target.closest('.chip'); if (!btn) return;
       sync();
-      const name = group.dataset.name, val = btn.dataset.v;
-      const p = split.parts[split.open];
-      if (name === 'mode') {
-        if (val !== split.mode) { split.mode = val; split.parts.forEach(q => { q.type = val === 'in' ? 'income' : 'expense'; q.advance = ''; }); }
-      } else if (name === 'account') {
-        if (val !== split.account) { split.account = val; split.parts.forEach(q => { q.pocket = pocketsOf(val)[0] ? pocketsOf(val)[0].id : ''; q.fund = fundFor(q.pocket); }); }
-      } else if (name === 'paid_to') {
-        split.paid_to = split.paid_to === val ? '' : val;
-        // A new part for this person starts with them as the person.
-        split.parts.forEach(q => { if (!q.person && val) q.person = val; });
-      } else if (name === 'fee_part') {
-        split.fee_part = Number(val);
-      } else if (p) {
-        if (name === 'pocket') { p.pocket = val; p.fund = fundFor(val); }
-        else if (name === 'ptype') {
-          p.type = val; const t = typeOf(val);
-          if (t.cat) p.category = t.cat; else if (t.person) p.category = '';
-          if (val !== 'payment') p.advance = '';
-        } else if (name === 'person') { p.person = p.person === val && !(typeOf(p.type).person || typeOf(p.type).who) ? '' : val; }
-        else p[name] = val;
+      const name = group.dataset.name;
+      if (btn.dataset.add) {
+        const p0 = split.parts[split.open];
+        openNewPerson(p0 && p0.fund, pid => { pick(name, pid); redraw(); });
+        return;
       }
+      pick(name, btn.dataset.v);
       redraw();
     };
   });
+  // A part's person brings the fund last used with them.
+  const usePersonFund = q => {
+    const pf = q.person && personFund(q.person);
+    if (pf) { q.fund = pf; q.fundFrom = q.person; } else q.fundFrom = '';
+  };
+  function pick(name, val) {
+    const p = split.parts[split.open];
+    if (name === 'mode') {
+      if (val !== split.mode) { split.mode = val; split.parts.forEach(q => { q.type = val === 'in' ? 'income' : 'expense'; q.advance = ''; }); }
+    } else if (name === 'account') {
+      if (val !== split.account) { split.account = val; split.parts.forEach(q => { q.pocket = pocketsOf(val)[0] ? pocketsOf(val)[0].id : ''; if (!(q.fundFrom && q.fundFrom === q.person)) q.fund = fundFor(q.pocket); }); }
+    } else if (name === 'paid_to') {
+      split.paid_to = split.paid_to === val ? '' : val;
+      // A new part for this person starts with them as the person.
+      split.parts.forEach(q => { if (!q.person && val) { q.person = val; usePersonFund(q); } });
+    } else if (name === 'fee_part') {
+      split.fee_part = Number(val);
+    } else if (p) {
+      if (name === 'pocket') { p.pocket = val; if (!(p.fundFrom && p.fundFrom === p.person)) p.fund = fundFor(val); }
+      else if (name === 'ptype') {
+        p.type = val; const t = typeOf(val);
+        if (t.cat) p.category = t.cat; else if (t.person) p.category = '';
+        if (val !== 'payment') p.advance = '';
+      } else if (name === 'person') { p.person = p.person === val && !(typeOf(p.type).person || typeOf(p.type).who) ? '' : val; usePersonFund(p); }
+      else { p[name] = val; if (name === 'fund') p.fundFrom = ''; }
+    }
+  }
 
   $('split-form').onsubmit = async e => { e.preventDefault(); sync(); await savePayment(); };
   $('save-draft').onclick = async () => { sync(); await saveDraft(); };
@@ -881,7 +910,7 @@ async function savePayment() {
     store.setJSON('cacheTxs', state.txs);
     if (split.draftId) { state.drafts = state.drafts.filter(d => d.id !== split.draftId); store.setJSON('cacheDrafts', state.drafts); }
     const fb = store.getJSON('fundByAccount', {});
-    split.parts.forEach(p => { if (p.pocket && p.fund) fb[p.pocket] = p.fund; });
+    split.parts.forEach(p => { if (p.pocket && p.fund && !p.fundFrom) fb[p.pocket] = p.fund; });
     store.setJSON('fundByAccount', fb);
     toast(`Saved ${money(num(split.total))}`);
     split.ready = false;
@@ -1061,6 +1090,133 @@ function renderTx(v, id) {
       toast(/Unknown action/.test(e.message) ? 'Delete needs the updated Apps Script (see Settings). For now, delete the row in the sheet.' : 'Not deleted: ' + e.message, true);
     }
   };
+}
+
+// ---------- New person ----------
+
+// The fund last used with this person (newest entry first), so picking them fills it in.
+function personFund(pid) {
+  let best = null;
+  const when = t => (t.date || '') + String(t.created_at || '');
+  for (const t of state.txs) if (t.person === pid && t.fund && (!best || when(t) > when(best))) best = t;
+  const f = best && byId(L.funds(), best.fund);
+  return f && isActive(f) ? f.id : '';
+}
+
+const squash = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+function editDistance(a, b) {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++)
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[a.length][b.length];
+}
+// People whose name looks like this one ("Dada K" / "DadaK", "Tumelo" / "Thumelo").
+function similarPeople(name) {
+  const q = squash(name); if (q.length < 2) return [];
+  return L.people().filter(p => {
+    const n = squash(p.name); if (!n) return false;
+    if (n === q) return true;
+    if (q.length >= 3 && n.length >= 3 && (n.startsWith(q) || q.startsWith(n))) return true;
+    return editDistance(n, q) <= (Math.max(n.length, q.length) > 6 ? 2 : 1);
+  });
+}
+
+// A sheet over the screen to add someone, with an optional starting balance.
+// onDone(id) is called with the new (or the existing, if picked) person's id.
+function openNewPerson(fund, onDone) {
+  const np = { name: '', note: '', dir: '', amount: '', fund: fund || '', saving: false };
+  const bg = document.createElement('div');
+  bg.className = 'sheet-bg';
+  document.body.appendChild(bg);
+  const close = () => { bg.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  bg.onclick = e => { if (e.target === bg) close(); };
+  const sync = () => {
+    np.name = $('np-name').value; np.note = $('np-note').value;
+    if ($('np-amount')) np.amount = $('np-amount').value;
+  };
+
+  const draw = () => {
+    const funds = L.funds().filter(isActive);
+    bg.innerHTML = `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="np-title">
+      <h3 id="np-title">New person</h3>
+      <label for="np-name" style="margin-top:0">Name</label>
+      <input id="np-name" autocapitalize="words" autocomplete="off" enterkeyhint="next" placeholder="e.g. Sipho" value="${esc(np.name)}">
+      <div id="np-similar" class="hint"></div>
+      <label for="np-note">Note (optional)</label>
+      <input id="np-note" autocomplete="off" enterkeyhint="done" placeholder="e.g. Agricoop worker" value="${esc(np.note)}">
+      <div class="lbl">Money already owed? (optional)</div>
+      ${chips('np-dir', [{ id: 'owes', name: 'Owes me' }, { id: 'owed', name: 'I owe them' }], np.dir, { none: 'No' })}
+      ${np.dir ? `<div class="amount-wrap small-amt"><span>R</span><input id="np-amount" inputmode="decimal" enterkeyhint="done" placeholder="0.00" value="${esc(np.amount)}"></div>
+        <div class="lbl">Fund</div>${chips('np-fund', funds, np.fund)}
+        <div class="hint">Saved as a starting balance dated today.</div>` : ''}
+      <button type="button" class="primary" id="np-save" ${np.saving ? 'disabled' : ''}>${np.saving ? 'Saving…' : 'Add person'}</button>
+      <button type="button" class="ghost" id="np-cancel">Cancel</button>
+      <p id="np-msg" class="hint"></p>
+    </div>`;
+    const showSimilar = () => {
+      const el = $('np-similar'); if (!el) return;
+      const sim = similarPeople($('np-name').value);
+      const exact = sim.find(p => squash(p.name) === squash($('np-name').value));
+      el.className = 'hint' + (exact ? ' err' : '');
+      el.innerHTML = !sim.length ? '' : (exact ? 'Already in the list: ' : 'Did you mean ') +
+        sim.slice(0, 3).map(p => `<button type="button" class="link" data-use="${esc(p.id)}">${esc(p.name)}${isActive(p) ? '' : ' (hidden)'}</button>`).join(', ') +
+        (exact ? '' : '?');
+      el.querySelectorAll('[data-use]').forEach(b => b.onclick = () => { close(); onDone(b.dataset.use); });
+    };
+    $('np-name').oninput = showSimilar; showSimilar();
+    bg.querySelectorAll('.chips').forEach(g => g.onclick = e => {
+      const b = e.target.closest('.chip'); if (!b) return;
+      sync();
+      if (g.dataset.name === 'np-dir') np.dir = b.dataset.v; else np.fund = b.dataset.v;
+      draw();
+      if (g.dataset.name === 'np-dir' && np.dir && $('np-amount')) $('np-amount').focus();
+    });
+    $('np-cancel').onclick = close;
+    $('np-save').onclick = save;
+  };
+
+  async function save() {
+    sync();
+    const msg = $('np-msg'), bad = t => { msg.className = 'hint err'; msg.textContent = t; };
+    const name = np.name.trim().replace(/\s+/g, ' ');
+    if (!name) return bad('Type a name.');
+    const same = L.people().find(p => squash(p.name) === squash(name));
+    if (same) return bad(`${same.name} is already in the list. Tap the name above to use it.`);
+    const amt = num(np.amount);
+    if (np.dir && amt <= 0) return bad('Enter the amount owed, or pick "No".');
+    if (np.dir && !np.fund) return bad('Pick the fund the money belongs to.');
+    np.saving = true; draw();
+    let person;
+    try {
+      person = await api('addPerson', { name, note: np.note.trim() });
+    } catch (e) {
+      np.saving = false; draw();
+      return bad('Not added: ' + needsNewScript(e));
+    }
+    state.lists.People = (state.lists.People || []).concat(person);
+    store.setJSON('cacheLists', state.lists);
+    if (np.dir) {
+      const signed = np.dir === 'owes' ? amt : -amt;
+      const tx = { date: localDay(new Date()), type: 'opening', amount: signed, currency: 'ZAR', rate: '', amount_zar: signed,
+        account: '', to_account: '', fund: np.fund, to_fund: '', category: '', person: person.id, fee: '', note: 'Starting balance' };
+      try {
+        const res = await api('addTransaction', tx);
+        tx.id = res.id; tx.created_at = new Date().toISOString();
+        state.txs.push(tx); store.setJSON('cacheTxs', state.txs);
+        toast(`Added ${person.name} (${np.dir === 'owes' ? 'owes you' : 'you owe'} ${money(amt)})`);
+      } catch (e) {
+        toast(`Added ${person.name}, but the starting balance was not saved: ${e.message}`, true);
+      }
+    } else toast(`Added ${person.name}`);
+    close();
+    onDone(person.id);
+  }
+
+  draw();
+  setTimeout(() => { const el = $('np-name'); if (el) el.focus(); }, 50);
 }
 
 // ---------- Settings ----------
