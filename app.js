@@ -1,7 +1,7 @@
 // Accounting app: quick entry, split payments, balances home screen, entry list, new people.
 'use strict';
 
-const VERSION = '0.6.2';
+const VERSION = '0.6.3';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -110,7 +110,14 @@ const TYPES = [
 const typeOf = id => TYPES.find(t => t.id === id) || TYPES[0];
 const isMove = t => ['transfer', 'exchange', 'fund_transfer'].includes(typeOf(t.type).id);
 
-const num = v => { const n = parseFloat(String(v).replace(/[ ,]/g, '')); return isFinite(n) ? n : 0; };
+// Amounts typed on the phone: "212,40" (the South African keyboard has a comma, not a point) is
+// R212.40; "1,049" or "1 049.50" use the comma or space between thousands.
+const num = v => {
+  let s = String(v == null ? '' : v).replace(/[\s\u00a0]/g, '');
+  if (!s.includes('.') && /,\d{1,2}$/.test(s)) s = s.replace(/,(\d{1,2})$/, '.$1');
+  const n = parseFloat(s.replace(/,/g, ''));
+  return isFinite(n) ? n : 0;
+};
 
 function normTx(t) {
   return Object.assign({}, t, { date: toDay(t.date) });
