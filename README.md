@@ -7,6 +7,16 @@ Phone-first home-screen web app for personal and fund accounting.
 
 No financial data is stored in this repository. The app keeps the Apps Script link and secret key only on the device.
 
+## New people (version 0.5)
+
+Every person list has a **+ New** chip. Type a name (the app warns about names that look like
+someone already in the list), an optional note, and optionally money already owed, which is saved
+as an `opening` entry for a fund. The Apps Script makes the id from the name; the id never
+changes, so the name can be edited in the People tab later. Picking a person fills in the fund
+last used with them.
+
+**After merging, update the Apps Script once** (same steps as below) so the app can add people.
+
 ## Split payments (version 0.4)
 
 One payment can be split into parts, each with its own pocket, fund, category and person
