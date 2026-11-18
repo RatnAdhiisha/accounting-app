@@ -1,7 +1,7 @@
 // Accounting app: quick entry, split payments, balances home screen, entry list, new people.
 'use strict';
 
-const VERSION = '0.6.5';
+const VERSION = '0.6.6';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -456,7 +456,9 @@ function txRow(t) {
   const type = typeOf(t.type);
   const cur = accCurrency(t.account);
   const amt = num(t.amount);
-  const sign = isMove(t) ? '' : (type.dir > 0 ? '+' : '−');
+  // No cash moved (e.g. a debt cleared by a pocket transfer): no plus or minus, the money didn't move here.
+  const noCash = !t.account && !isMove(t) && type.id !== 'opening';
+  const sign = isMove(t) || noCash ? '' : (type.dir > 0 ? '+' : '−');
   let partOf = '';
   if (t.group_id) {
     const cash = cashRows(groupRows(t.group_id));
@@ -465,10 +467,10 @@ function txRow(t) {
       partOf = `part of ${money(g)}${t.paid_to ? ' to ' + nameOf(L.people(), t.paid_to) : ''}`;
     }
   }
-  const bits = [niceDate(t.date), isMove(t) ? type.label : accName(t.account),
+  const bits = [niceDate(t.date), isMove(t) ? type.label : noCash ? type.label + ', no cash' : accName(t.account),
     nameOf(L.funds(), t.fund), t.person ? nameOf(L.people(), t.person) : '', partOf].filter(Boolean);
   return `<div class="tx" data-id="${esc(t.id)}"><div class="l"><div class="t1">${esc(txTitle(t))}</div><div class="t2">${esc(bits.join(' · '))}</div></div>
-    <div class="amt ${type.dir > 0 && type.id !== 'opening' ? 'in' : ''}">${sign}${money(amt, cur)}</div></div>`;
+    <div class="amt ${type.dir > 0 && type.id !== 'opening' && !noCash ? 'in' : ''}">${sign}${money(amt, cur)}</div></div>`;
 }
 // Lists show one line per payment; with a fund, account or person filter, the matching parts instead.
 function listItems(rows, showParts) {
