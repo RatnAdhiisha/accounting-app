@@ -82,7 +82,7 @@ const postable = () => {
 
 // Usual fund for each account, until you pick something else (then the app remembers your choice).
 const DEFAULT_FUND = { 'tyme-ratna': 'personal', 'tyme-guna': 'guna', 'tyme-transit': 'feeding',
-  'cash-zar': 'personal', 'cash-eur': 'personal', 'agricoop-cash': 'agricoop' };
+  'cash-zar': 'personal', 'cash-eur': 'personal', 'agricoop-cash': 'agricoop', 'citydeep-card': 'personal' };
 
 // ---------- Entry types and balance rules ----------
 // Person balance: positive = the person owes you, negative = you owe them.
@@ -200,9 +200,10 @@ function owedByPerson(person) {
 // Each account belongs to one fund ("whose account"). When another fund's money is spent from it
 // (Dada Guna's advance paid from your Cash ZAR), that fund owes the account's fund. When another
 // fund's money is kept in it, the account's fund owes that fund. The Projects pocket holds several
-// funds on purpose, so money kept there is not a debt; only overspending there is.
+// funds on purpose, so money kept there is not a debt; only overspending there is. The City Deep
+// buyer's card is the same: it holds money of whoever it buys for.
 const ACCOUNT_FUND = Object.assign({ 'ajbulk-cash': 'ventures' }, DEFAULT_FUND);
-const SHARED_ACCOUNTS = new Set(['tyme-transit']);
+const SHARED_ACCOUNTS = new Set(['tyme-transit', 'citydeep-card']);
 // Where each fund's money normally lives, for settling up.
 const FUND_ACCOUNT = { personal: 'tyme-ratna', guna: 'tyme-guna', feeding: 'tyme-transit', agricoop: 'agricoop-cash' };
 
