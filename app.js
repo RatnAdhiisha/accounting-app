@@ -1,7 +1,7 @@
 // Accounting app: quick entry, split payments, balances home screen, entry list, new people.
 'use strict';
 
-const VERSION = '0.6.4';
+const VERSION = '0.6.5';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -351,17 +351,20 @@ function renderHome(v) {
   }).join('');
 
   // Each debt belongs to a fund: "School owes Dada K's feeding program R1,049".
-  const debtLine = (x, fid) => x > 0 ? `owes ${fundLabel(fid)}` : `${fundLabel(fid)} owes them`;
+  // Tap a debt to settle it: "Paid back" when you owe them, "Got back" when they owe you.
+  const debtLine = (x, fid) => x > 0 ? `owes ${fundLabel(fid)}` : fid === 'personal' ? 'you owe them' : `${fundLabel(fid)} owes them`;
+  const settleLink = x => `<div><button type="button" class="link">${x < 0 ? 'Pay back' : 'Got back'} ›</button></div>`;
+  const debtRow = (cls, pid, fid, x, name) => `<div class="row tap ${cls}" data-pdebt="${esc(pid)}|${esc(fid)}|${Math.abs(x)}"><span class="name">${name}</span><span class="amt ${x < 0 ? 'neg' : ''}">${money(Math.abs(x))}${settleLink(x)}</span></div>`;
   const owed = L.people().map(p => ({ p, o: b.owed[p.id] })).filter(r => r.o && Object.keys(r.o.funds).length)
     .sort((a, b) => b.o.total - a.o.total);
   const peopleRows = owed.length ? owed.map(({ p, o }) => {
     const parts = Object.entries(o.funds).sort((a, b) => b[1] - a[1]);
     if (parts.length === 1) {
       const [fid, x] = parts[0];
-      return `<div class="row"><span class="name">${esc(p.name)} <span class="muted small">${esc(debtLine(x, fid))}</span></span><span class="amt ${x < 0 ? 'neg' : ''}">${money(Math.abs(x))}</span></div>`;
+      return debtRow('', p.id, fid, x, `${esc(p.name)} <span class="muted small">${esc(debtLine(x, fid))}</span>`);
     }
     return `<div class="row parent"><span class="name">${esc(p.name)} <span class="muted small">${o.total >= 0 ? 'owes in all' : 'is owed in all'}</span></span><span class="amt ${o.total < 0 ? 'neg' : ''}">${money(Math.abs(o.total))}</span></div>` +
-      parts.map(([fid, x]) => `<div class="row sub"><span class="name">${esc(debtLine(x, fid))}</span><span class="amt ${x < 0 ? 'neg' : ''}">${money(Math.abs(x))}</span></div>`).join('');
+      parts.map(([fid, x]) => debtRow('sub', p.id, fid, x, esc(debtLine(x, fid)))).join('');
   }).join('') : '<div class="empty small">Nobody owes anything.</div>';
   // Funds that owe each other, with a button to pay it back.
   const fundDebtRows = fundDebts(state.txs).map(d => {
@@ -403,8 +406,39 @@ function renderHome(v) {
       note: `${nameOf(L.funds(), from)} pays back ${nameOf(L.funds(), to)}`, settle: { from, to } };
     location.hash = '#add';
   });
+  v.querySelectorAll('[data-pdebt]').forEach(el => el.onclick = () => {
+    const [pid, fid, amount] = el.dataset.pdebt.split('|');
+    startPersonSettle(pid, fid, b.person[pid + '|' + fid] || 0, amount);
+  });
   v.querySelectorAll('[data-draft]').forEach(el => el.onclick = () => { location.hash = '#split/draft/' + encodeURIComponent(el.dataset.draft); });
 }
+
+// ---------- Settle a person's debt ----------
+// A person who also has a fund with their own pocket (Dada Guna): you can pay them back into
+// that pocket instead of paying them out, or take what they owe from it.
+function personPocket(pid) {
+  const key = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const p = byId(L.people(), pid); if (!p) return null;
+  const f = L.funds().find(f => key(f.name) === key(p.name) || f.id === pid);
+  const acc = f && FUND_ACCOUNT[f.id];
+  if (!acc || SHARED_ACCOUNTS.has(acc) || !postable().some(a => a.id === acc)) return null;
+  return { account: acc, fund: f.id };
+}
+function startPersonSettle(pid, fid, bal, amount) {
+  const name = nameOf(L.people(), pid);
+  const type = bal < 0 ? 'payback' : 'repayment';
+  const acc = FUND_ACCOUNT[fid];
+  const pocket = personPocket(pid);
+  formSeed = { type, amount, person: pid, fund: fid, fundFrom: pid, category: '', fee: '', moveFund: false, to_fund: '', to_account: '',
+    note: type === 'payback' ? `Paid back ${name}` : `${name} paid back`,
+    pdebt: { person: pid, fund: fid, type, pocket } };
+  if (acc && postable().some(a => a.id === acc)) formSeed.account = acc;
+  // Dada Guna: his money is kept in his own pocket, so that is the usual way to settle.
+  if (pocket) { formSeed.viaPocket = true; if (formSeed.account === pocket.account) formSeed.account = ''; }
+  location.hash = '#add';
+}
+// Settling through the person's pocket: is it on for the form as it is now?
+const pocketMode = () => !!(form.pdebt && form.pdebt.pocket && form.viaPocket && form.type === form.pdebt.type && form.person === form.pdebt.person);
 
 function sortedTxs() {
   return state.txs.slice().sort((a, b) => (b.date || '').localeCompare(a.date || '') || String(b.created_at || '').localeCompare(String(a.created_at || '')));
@@ -479,7 +513,7 @@ function resetForm(keepType) {
   Object.assign(form, {
     type, amount: '', account, to_account: '', fund: fundFor(account), to_fund: '',
     category: (last.cats || {})[type] || typeOf(type).cat || '', person: '', note: '', date: localDay(new Date()),
-    fee: '', rate: '', moveFund: false, fundFrom: '', settle: null,
+    fee: '', rate: '', moveFund: false, fundFrom: '', settle: null, pdebt: null, viaPocket: false,
   });
 }
 function fundFor(account) {
@@ -508,6 +542,17 @@ function renderAdd(v) {
   const cur = accCurrency(form.account);
   const needRate = cur !== 'ZAR' || (isTransfer && form.to_account && accCurrency(form.to_account) !== cur);
   const isTyme = /^tyme/.test(form.account);
+  const pd = form.pdebt && form.pdebt.type === type.id && form.person === form.pdebt.person ? form.pdebt : null;
+  const viaPocket = pocketMode();
+  const pname = pd ? esc(nameOf(L.people(), pd.person)) : '';
+  const pocketChoice = pd && pd.pocket ? `<div class="lbl">${type.id === 'payback' ? 'Where does the money go?' : 'Where does the money come from?'}</div>
+      ${chips('via', type.id === 'payback'
+        ? [{ id: 'pocket', name: `Into ${pname}'s pocket` }, { id: 'out', name: `Paid out to ${pname}` }]
+        : [{ id: 'pocket', name: `From ${pname}'s pocket` }, { id: 'out', name: `${pname} gave it` }], viaPocket ? 'pocket' : 'out')}
+      ${viaPocket ? `<div class="hint">${type.id === 'payback'
+        ? `Moves the money into ${esc(accName(pd.pocket.account))} (fund ${esc(nameOf(L.funds(), pd.pocket.fund))}) and clears what you owe.`
+        : `Moves the money out of ${esc(accName(pd.pocket.account))} (fund ${esc(nameOf(L.funds(), pd.pocket.fund))}) and clears what ${pname} owes.`}</div>` : ''}` : '';
+  const accChoices = viaPocket ? accs.filter(a => a.id !== pd.pocket.account && accCurrency(a.id) === 'ZAR') : accs;
 
   v.innerHTML = `
     <header><h1>New entry</h1></header>
@@ -521,8 +566,9 @@ function renderAdd(v) {
 
       ${type.person || type.who || isOpening ? `<div class="lbl">Person${isOpening ? ' (only for a person\'s opening balance)' : ''}</div>${chips('person', people, form.person, isOpening ? { none: 'No one', add: true } : { add: true })}` : ''}
 
-      ${type.noCash ? '' : `<div class="lbl">${isTransfer ? 'From' : 'Account'}</div>
-      ${chips('account', accs, form.account, isOpening ? { none: 'None' } : type.person ? { none: 'No cash' } : {})}`}
+      ${pocketChoice}
+      ${type.noCash ? '' : `<div class="lbl">${isTransfer || (pd && type.dir < 0) ? 'From' : pd ? 'Into' : 'Account'}</div>
+      ${chips('account', accChoices, form.account, isOpening || viaPocket ? (isOpening ? { none: 'None' } : {}) : type.person ? { none: 'No cash' } : {})}`}
 
       ${isTransfer ? `<div class="lbl">To</div>${chips('to_account', accs.filter(a => a.id !== form.account), form.to_account)}` : ''}
 
@@ -536,7 +582,7 @@ function renderAdd(v) {
       ${isTransfer ? `<div class="hint"><label style="display:flex;gap:8px;align-items:center;margin:0;color:inherit"><input type="checkbox" id="f-movefund" style="width:auto" ${form.moveFund ? 'checked' : ''}> Money also changes fund</label></div>
         ${form.moveFund ? `<div class="lbl">To fund</div>${chips('to_fund', funds.filter(f => f.id !== form.fund), form.to_fund)}` : ''}` : ''}
 
-      ${!isTransfer && !isOpening ? `<div class="lbl">Category</div>${chips('category', cats, form.category, type.person ? { none: 'None' } : {})}` : ''}
+      ${!isTransfer && !isOpening && !viaPocket ? `<div class="lbl">Category</div>${chips('category', cats, form.category, type.person ? { none: 'None' } : {})}` : ''}
 
       ${!type.person && !type.who && !isOpening && !isTransfer ? `<div class="lbl">Person (optional)</div>${chips('person', people, form.person, { none: 'No one', add: true })}` : ''}
 
@@ -550,7 +596,7 @@ function renderAdd(v) {
       ${!isOpening && isTyme ? `<button type="button" class="link" id="sms-fee">+ R0.50 SMS fee</button>` : ''}
 
       <button class="primary" id="save" type="submit">Save</button>
-      ${SPLIT_TYPES.has(type.id) && !isOpening && (!form.account || accCurrency(form.account) === 'ZAR') ? '<button type="button" class="ghost" id="to-split">Split into parts…</button>' : ''}
+      ${SPLIT_TYPES.has(type.id) && !isOpening && !viaPocket && (!form.account || accCurrency(form.account) === 'ZAR') ? '<button type="button" class="ghost" id="to-split">Split into parts…</button>' : ''}
       <p id="form-msg" class="hint"></p>
     </form>`;
 
@@ -570,14 +616,17 @@ function renderAdd(v) {
         openNewPerson(form.fund, pid => { form.person = pid; usePersonFund(); renderAdd(v); });
         return;
       }
-      if (name === 'type') {
+      if (name === 'via') {
+        form.viaPocket = val === 'pocket';
+        if (form.viaPocket && form.account === form.pdebt.pocket.account) form.account = '';
+      } else if (name === 'type') {
         form.type = val;
         const cats = (store.getJSON('lastEntry', {}).cats) || {};
         form.category = cats[val] || typeOf(val).cat || '';
         if (val === 'opening') { form.fee = ''; }
       } else if (name === 'account') {
         form.account = val;
-        if (val && !(form.fundFrom && form.fundFrom === form.person)) form.fund = fundFor(val);
+        if (val && !(form.fundFrom && form.fundFrom === form.person) && !form.pdebt) form.fund = fundFor(val);
         if (form.to_account === val) form.to_account = '';
       } else {
         form[name] = (form[name] === val && name !== 'fund') ? '' : val;
@@ -628,6 +677,8 @@ function validate() {
     return '';
   }
   if (type.noCash) form.account = '';
+  if (pocketMode() && (!form.account || accCurrency(form.account) !== 'ZAR' || form.account === form.pdebt.pocket.account))
+    return type.dir < 0 ? 'Pick where the money comes from.' : 'Pick where the money goes.';
   if (!form.account && !type.person) return 'Pick an account.';
   if (type.noCash && !form.category) return 'Pick a category.';
   if (!form.fund) return 'Pick a fund.';
@@ -658,6 +709,7 @@ async function saveEntry() {
     category: type.id === 'transfer' || type.id === 'opening' ? '' : form.category,
     person: form.person || '', fee: num(form.fee) || '', note: form.note.trim(),
   };
+  if (pocketMode()) return savePocketSettle(tx);
   const btn = $('save'); btn.disabled = true; btn.textContent = 'Saving…';
   try {
     const res = await api('addTransaction', tx);
@@ -675,6 +727,38 @@ async function saveEntry() {
   } catch (e) {
     btn.disabled = false; btn.textContent = 'Save';
     msg.className = 'hint err'; msg.textContent = 'Not saved: ' + e.message;
+  }
+}
+
+// Settle through the person's own pocket (Dada Guna): two rows. A transfer moves the money between
+// the pockets (and funds), and a "No cash" Paid back / Got back clears the person's debt.
+async function savePocketSettle(tx) {
+  const pk = form.pdebt.pocket, out = tx.type === 'payback';
+  const from = out ? { a: tx.account, f: tx.fund } : { a: pk.account, f: pk.fund };
+  const to = out ? { a: pk.account, f: pk.fund } : { a: tx.account, f: tx.fund };
+  const move = Object.assign({}, tx, { type: 'transfer', account: from.a, to_account: to.a, fund: from.f,
+    to_fund: to.f !== from.f ? to.f : '', category: '', person: '' });
+  const debt = Object.assign({}, tx, { account: '', to_account: '', to_fund: '', category: '', fee: '' });
+  const btn = $('save'); btn.disabled = true; btn.textContent = 'Saving…';
+  const done = [];
+  try {
+    for (const row of [move, debt]) {
+      const res = await api('addTransaction', row);
+      row.id = res.id; row.created_at = new Date().toISOString();
+      state.txs.push(row); store.setJSON('cacheTxs', state.txs); done.push(row);
+    }
+    toast(`Saved ${money(tx.amount)}`);
+    resetForm(tx.type);
+    location.hash = '#home';
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'Save';
+    if (done.length) {
+      // Only the debt row is left: switch the form to it, so Save adds just that.
+      form.viaPocket = false; form.account = '';
+      renderAdd($('view'));
+    }
+    const m = $('form-msg'); m.className = 'hint err';
+    m.textContent = done.length ? `The money move was saved, but clearing the debt was not (${e.message}). Tap Save again to clear it.` : 'Not saved: ' + e.message;
   }
 }
 

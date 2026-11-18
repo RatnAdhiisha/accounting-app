@@ -116,3 +116,5 @@ dl { margin:0; } dt { color:var(--muted); font-size:13px; margin-top:10px; } dd 
   border-radius:16px 16px 0 0; padding:16px 16px calc(16px + env(safe-area-inset-bottom)); }
 .sheet h3 { margin:0 0 10px; font-size:18px; }
 .sheet button.primary, .sheet button.ghost { width:100%; margin-top:10px; }
+.row.tap { cursor:pointer; }
+.row.tap .link { padding:2px 0 0; font-size:13px; }
