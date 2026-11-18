@@ -1,7 +1,7 @@
 // Accounting app: quick entry, split payments, balances home screen, entry list, new people.
 'use strict';
 
-const VERSION = '0.6.5';
+const VERSION = '0.6.7';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -110,6 +110,8 @@ const TYPES = [
     hint: 'They bring the receipt for an advance. Enter what it really cost; their debt goes down. Enter change they give back with "Got back".' },
 ];
 const typeOf = id => TYPES.find(t => t.id === id) || TYPES[0];
+// A Paid back / Got back whose other side is one of your own pockets (to_account).
+const pocketSettle = t => (t.type === 'payback' || t.type === 'repayment') && !!t.to_account && !!t.account;
 const isMove = t => ['transfer', 'exchange', 'fund_transfer'].includes(typeOf(t.type).id);
 
 // Amounts typed on the phone: "212,40" (the South African keyboard has a comma, not a point) is
@@ -169,6 +171,9 @@ function effects(t) {
     // No account = no cash moved (e.g. stock handed to a partner): only the person balance changes.
     add(acc, t.account, type.dir * amt - feeAcc);
     if (t.account) add(fund, t.fund, type.dir * zar - feeZar);
+    // Paid back into / Got back from the person's own pocket (Dada Guna): the money moves the
+    // other way in that pocket, so it is one entry instead of a transfer plus a no-cash row.
+    if (pocketSettle(t)) { add(acc, t.to_account, -type.dir * amt); add(fund, t.to_fund || t.fund, -type.dir * zar); }
     if (type.person && t.person) add(person, t.person + '|' + (t.fund || ''), type.person * zar);
   }
   return { acc, fund, person, zar, feeZar };
@@ -218,7 +223,10 @@ function cellEffects(t) {
   else if (type.id === 'transfer' || type.id === 'exchange') {
     add(t.account, t.fund, -zar - fee); add(t.to_account || t.account, t.to_fund || t.fund, zar);
   } else if (type.id === 'opening') add(t.account, t.fund, zar);
-  else add(t.account, t.fund, type.dir * zar - fee);
+  else {
+    add(t.account, t.fund, type.dir * zar - fee);
+    if (pocketSettle(t)) add(t.to_account, t.to_fund || t.fund, -type.dir * zar);
+  }
   return out;
 }
 
@@ -450,14 +458,20 @@ function txTitle(t) {
   if (t.note) return t.note;
   if (type.id === 'fund_transfer') return `${nameOf(L.funds(), t.fund)} → ${nameOf(L.funds(), t.to_fund)}`;
   if (isMove(t)) return `${accName(t.account)} → ${accName(t.to_account)}`;
+  if (pocketSettle(t)) return `${type.label} · ${nameOf(L.people(), t.person)}`;
   if (type.person && t.person) return `${type.label} · ${nameOf(L.people(), t.person)}`;
   return nameOf(L.categories(), t.category) || type.label;
 }
+// "Tyme Dada Ratna → Tyme Dada Guna": where the money went for a pocket settle.
+const pocketPath = t => typeOf(t.type).dir < 0 ? `${accName(t.account)} → ${accName(t.to_account)}` : `${accName(t.to_account)} → ${accName(t.account)}`;
 function txRow(t) {
   const type = typeOf(t.type);
   const cur = accCurrency(t.account);
   const amt = num(t.amount);
-  const sign = isMove(t) ? '' : (type.dir > 0 ? '+' : '−');
+  // No cash moved (e.g. a debt cleared by a pocket transfer): no plus or minus, the money didn't move here.
+  const noCash = !t.account && !isMove(t) && type.id !== 'opening';
+  const pocket = pocketSettle(t);
+  const sign = isMove(t) || noCash || pocket ? '' : (type.dir > 0 ? '+' : '−');
   let partOf = '';
   if (t.group_id) {
     const cash = cashRows(groupRows(t.group_id));
@@ -466,10 +480,10 @@ function txRow(t) {
       partOf = `part of ${money(g)}${t.paid_to ? ' to ' + nameOf(L.people(), t.paid_to) : ''}`;
     }
   }
-  const bits = [niceDate(t.date), isMove(t) ? type.label : accName(t.account),
+  const bits = [niceDate(t.date), isMove(t) ? type.label : noCash ? type.label + ', no cash' : pocket ? pocketPath(t) : accName(t.account),
     nameOf(L.funds(), t.fund), t.person ? nameOf(L.people(), t.person) : '', partOf].filter(Boolean);
   return `<div class="tx" data-id="${esc(t.id)}"><div class="l"><div class="t1">${esc(txTitle(t))}</div><div class="t2">${esc(bits.join(' · '))}</div></div>
-    <div class="amt ${type.dir > 0 && type.id !== 'opening' ? 'in' : ''}">${sign}${money(amt, cur)}</div></div>`;
+    <div class="amt ${type.dir > 0 && type.id !== 'opening' && !noCash && !pocket ? 'in' : ''}">${sign}${money(amt, cur)}</div></div>`;
 }
 // Lists show one line per payment; with a fund, account or person filter, the matching parts instead.
 function listItems(rows, showParts) {
@@ -710,7 +724,7 @@ async function saveEntry() {
     category: type.id === 'transfer' || type.id === 'opening' ? '' : form.category,
     person: form.person || '', fee: num(form.fee) || '', note: form.note.trim(),
   };
-  if (pocketMode()) return savePocketSettle(tx);
+  if (pocketMode()) pocketRow(tx);
   const btn = $('save'); btn.disabled = true; btn.textContent = 'Saving…';
   try {
     const res = await api('addTransaction', tx);
@@ -731,36 +745,11 @@ async function saveEntry() {
   }
 }
 
-// Settle through the person's own pocket (Dada Guna): two rows. A transfer moves the money between
-// the pockets (and funds), and a "No cash" Paid back / Got back clears the person's debt.
-async function savePocketSettle(tx) {
-  const pk = form.pdebt.pocket, out = tx.type === 'payback';
-  const from = out ? { a: tx.account, f: tx.fund } : { a: pk.account, f: pk.fund };
-  const to = out ? { a: pk.account, f: pk.fund } : { a: tx.account, f: tx.fund };
-  const move = Object.assign({}, tx, { type: 'transfer', account: from.a, to_account: to.a, fund: from.f,
-    to_fund: to.f !== from.f ? to.f : '', category: '', person: '' });
-  const debt = Object.assign({}, tx, { account: '', to_account: '', to_fund: '', category: '', fee: '' });
-  const btn = $('save'); btn.disabled = true; btn.textContent = 'Saving…';
-  const done = [];
-  try {
-    for (const row of [move, debt]) {
-      const res = await api('addTransaction', row);
-      row.id = res.id; row.created_at = new Date().toISOString();
-      state.txs.push(row); store.setJSON('cacheTxs', state.txs); done.push(row);
-    }
-    toast(`Saved ${money(tx.amount)}`);
-    resetForm(tx.type);
-    location.hash = '#home';
-  } catch (e) {
-    btn.disabled = false; btn.textContent = 'Save';
-    if (done.length) {
-      // Only the debt row is left: switch the form to it, so Save adds just that.
-      form.viaPocket = false; form.account = '';
-      renderAdd($('view'));
-    }
-    const m = $('form-msg'); m.className = 'hint err';
-    m.textContent = done.length ? `The money move was saved, but clearing the debt was not (${e.message}). Tap Save again to clear it.` : 'Not saved: ' + e.message;
-  }
+// Settle through the person's own pocket (Dada Guna): one Paid back / Got back row whose
+// to_account is the pocket. It moves the money between the pockets and clears the debt.
+function pocketRow(tx) {
+  const pk = form.pdebt.pocket;
+  return Object.assign(tx, { to_account: pk.account, to_fund: pk.fund !== tx.fund ? pk.fund : '', category: '' });
 }
 
 // ---------- Split payments ----------
@@ -1240,14 +1229,14 @@ function renderTx(v, id) {
   if (!t) { v.innerHTML = '<header><h1>Entry</h1></header><p class="muted">Entry not found.</p><p><a class="link" href="#home">‹ Home</a></p>'; return; }
   if (t.group_id) { renderPay(v, encodeURIComponent(t.group_id)); return; }
   const type = typeOf(t.type), cur = accCurrency(t.account);
-  const canEdit = SPLIT_TYPES.has(type.id) && t.account && accCurrency(t.account) === 'ZAR' && fromAccounts().some(a => a.id === topOf(t.account));
+  const canEdit = SPLIT_TYPES.has(type.id) && !pocketSettle(t) && t.account && accCurrency(t.account) === 'ZAR' && fromAccounts().some(a => a.id === topOf(t.account));
   const item = (k, val) => val === '' || val == null ? '' : `<dt>${k}</dt><dd>${esc(val)}</dd>`;
   v.innerHTML = `
     <header><h1>${esc(type.label)}</h1></header>
     <div class="card pad"><dl>
       ${item('Amount', money(num(t.amount), cur) + (cur !== 'ZAR' && num(t.amount_zar) ? ' (' + money(num(t.amount_zar)) + ')' : ''))}
       ${item('Date', niceDate(t.date))}
-      ${item(isMove(t) ? 'From' : 'Account', accName(t.account))}
+      ${pocketSettle(t) ? item('Money', pocketPath(t)) : item(isMove(t) ? 'From' : 'Account', accName(t.account))}
       ${isMove(t) ? item('To', accName(t.to_account)) : ''}
       ${item('Fund', nameOf(L.funds(), t.fund))}
       ${item('To fund', nameOf(L.funds(), t.to_fund))}
