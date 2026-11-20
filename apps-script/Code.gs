@@ -63,7 +63,13 @@ const TABS = {
   Transactions: {
     headers: ['id', 'date', 'type', 'amount', 'currency', 'rate', 'amount_zar',
               'account', 'to_account', 'fund', 'to_fund', 'category', 'person',
-              'fee', 'note', 'receipt_url', 'created_at', 'source', 'group_id', 'paid_to'],
+              'fee', 'note', 'receipt_url', 'created_at', 'source', 'group_id', 'paid_to', 'planned'],
+    rows: [],
+  },
+  // Planned spending: monthly bills and limits, and one-off bills.
+  Planned: {
+    headers: ['id', 'name', 'kind', 'type', 'amount', 'account', 'fund', 'category', 'person',
+              'repeat', 'day', 'date', 'active', 'note', 'updated_at'],
     rows: [],
   },
   // Unfinished split payments. "data" holds the app's form as text.
@@ -165,6 +171,7 @@ function doGet(e) {
         Categories: readTab_('Categories'), People: readTab_('People') } });
       case 'transactions': return json_({ ok: true, data: readTab_('Transactions') });
       case 'drafts': return json_({ ok: true, data: readTab_('Drafts') });
+      case 'planned': return json_({ ok: true, data: readTab_('Planned') });
       default: throw new Error('Unknown action');
     }
   } catch (err) {
@@ -180,8 +187,8 @@ function doPost(e) {
     lock.waitLock(10000);
     switch (req.action) {
       case 'addTransaction': {
-        const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Transactions');
-        const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+        const sh = sheet_('Transactions');
+        const headers = headers_(sh, TABS.Transactions.headers);
         const t = Object.assign({}, req.data, {
           id: Utilities.getUuid(), created_at: new Date().toISOString() });
         sh.appendRow(headers.map(h => t[h] === undefined ? '' : t[h]));
@@ -231,6 +238,20 @@ function doPost(e) {
       }
       case 'deleteDraft': {
         deleteRowsWhere_(sheet_('Drafts'), r => r.id === req.data.id);
+        return json_({ ok: true, data: { id: req.data.id } });
+      }
+      // A planned item, new or edited (same id = replaced).
+      case 'savePlanned': {
+        const sh = sheet_('Planned');
+        const headers = headers_(sh, TABS.Planned.headers);
+        const id = req.data.id || Utilities.getUuid();
+        const row = Object.assign({}, req.data, { id, updated_at: new Date().toISOString() });
+        deleteRowsWhere_(sh, r => r.id === id);
+        appendRows_(sh, headers, [row]);
+        return json_({ ok: true, data: row });
+      }
+      case 'deletePlanned': {
+        deleteRowsWhere_(sheet_('Planned'), r => r.id === req.data.id);
         return json_({ ok: true, data: { id: req.data.id } });
       }
       // A new person from the app. The id is made from the name and never changes;

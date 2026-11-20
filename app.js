@@ -1,7 +1,7 @@
-// Accounting app: quick entry, split payments, balances home screen, entry list, new people.
+// Accounting app: quick entry, split payments, balances home screen, entry list, new people, planned spending.
 'use strict';
 
-const VERSION = '0.7.0';
+const VERSION = '0.8.0';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -34,6 +34,8 @@ const state = {
   lists: store.getJSON('cacheLists', null),
   txs: store.getJSON('cacheTxs', []),
   drafts: store.getJSON('cacheDrafts', []),
+  planned: store.getJSON('cachePlanned', []),
+  plannedErr: '',
   loadedAt: store.get('cacheAt'),
   loading: false,
   error: '',
@@ -53,6 +55,9 @@ async function refresh() {
   }
   // Drafts need the updated Apps Script; an older one just means no drafts.
   try { state.drafts = await api('drafts'); store.setJSON('cacheDrafts', state.drafts); } catch (e) {}
+  // Planned spending also needs the updated Apps Script.
+  try { state.planned = (await api('planned')).map(normPlan); state.plannedErr = ''; store.setJSON('cachePlanned', state.planned); }
+  catch (e) { if (/Unknown action/.test(e.message)) state.plannedErr = 'Planned spending needs the updated Apps Script (Code.gs, 20 Nov 2026).'; }
   state.loading = false;
   render();
 }
@@ -312,10 +317,11 @@ function render() {
   else if (tab === 'list') renderList(v);
   else if (tab === 'split') { if (!v.querySelector('#split-form') || render.lastTab !== 'split' || !split.ready) renderSplit(v, route().slice(1)); }
   else if (tab === 'pay') renderPay(v, arg);
+  else if (tab === 'plan') { if (arg !== 'edit') renderPlan(v); else if (!v.querySelector('#plan-form') || render.lastHash !== location.hash) renderPlanEdit(v); }
   else if (tab === 'tx') renderTx(v, arg);
   else if (tab === 'settings') renderSettings(v);
   else renderHome(v);
-  render.lastTab = tab;
+  render.lastTab = tab; render.lastHash = location.hash;
 }
 
 function statusLine() {
@@ -336,6 +342,9 @@ function renderHome(v) {
   const b = balances();
   const accs = L.accounts();
   const eurRate = lastRate('EUR');
+  const plan = planStatus();
+  // "R650 after planned": the balance minus what is still planned for this month.
+  const after = (x, left) => left > 0.004 ? `<div class="small ${x - left < 0 ? 'err' : 'muted'}">${money(x - left)} after planned</div>` : '';
 
   // Accounts, with pockets under their parent.
   let accRows = '', totalZar = 0, missingRate = false;
@@ -345,10 +354,11 @@ function renderHome(v) {
     if (kids.length) {
       const sum = kids.reduce((s, c) => s + (b.acc[c.id] || 0), 0);
       totalZar += sum;
-      accRows += `<div class="row parent"><span class="name">${esc(a.name)}</span><span class="amt ${sum < 0 ? 'neg' : ''}">${money(sum)}</span></div>`;
+      const kidsLeft = kids.reduce((s, c) => s + (plan.byAcc[c.id] || 0), 0);
+      accRows += `<div class="row parent"><span class="name">${esc(a.name)}</span><span class="amt ${sum < 0 ? 'neg' : ''}">${money(sum)}${after(sum, kidsLeft)}</span></div>`;
       for (const c of kids) {
         const x = b.acc[c.id] || 0;
-        accRows += `<div class="row sub"><span class="name">${esc(c.name)}</span><span class="amt ${x < 0 ? 'neg' : ''}">${money(x)}</span></div>`;
+        accRows += `<div class="row sub"><span class="name">${esc(c.name)}</span><span class="amt ${x < 0 ? 'neg' : ''}">${money(x)}${after(x, plan.byAcc[c.id] || 0)}</span></div>`;
       }
     } else if (shown(a)) {
       const x = b.acc[a.id] || 0, cur = a.currency || 'ZAR';
@@ -360,6 +370,7 @@ function renderHome(v) {
       } else totalZar += x;
       const kept = Object.keys(b.held).filter(k => k.split('|')[1] === a.id).reduce((s, k) => s + b.held[k], 0);
       if (kept > 0.004) extra += `<div class="muted small">${money(kept)} kept for others</div>`;
+      if (cur === 'ZAR') extra += after(x, plan.byAcc[a.id] || 0);
       accRows += `<div class="row"><span class="name">${esc(a.name)}</span><span class="amt ${x < 0 ? 'neg' : ''}">${money(x, cur)}${extra}</span></div>`;
     }
   }
@@ -368,7 +379,7 @@ function renderHome(v) {
     const x = b.fund[f.id] || 0;
     // Personal also holds money kept for people without a fund of their own (Ana's R100).
     const kept = f.id !== 'personal' ? 0 : Object.keys(b.held).filter(k => k.split('|')[2] === f.id).reduce((s, k) => s + b.held[k], 0);
-    const extra = kept > 0.004 ? `<div class="muted small">${money(kept)} kept for others</div>` : '';
+    const extra = (kept > 0.004 ? `<div class="muted small">${money(kept)} kept for others</div>` : '') + after(x, plan.byFund[f.id] || 0);
     return `<div class="row"><span class="name">${esc(f.name)}</span><span class="amt ${x < 0 ? 'neg' : ''}">${money(x)}${extra}</span></div>`;
   }).join('');
 
@@ -414,9 +425,11 @@ function renderHome(v) {
     <div class="total-box">
       <div class="small">All money${missingRate ? ' (foreign cash without a rate left out)' : ''}</div>
       <div class="big">${money(totalZar)}</div>
+      ${plan.left > 0.004 ? `<div class="small">${money(totalZar - plan.left)} after planned spending this month</div>` : ''}
       ${owesMe || iOwe ? `<div class="small">${owesMe ? 'Owed back ' + money(owesMe) : ''}${owesMe && iOwe ? ' · ' : ''}${iOwe ? 'Owed to others ' + money(iOwe) : ''}</div>` : ''}
     </div>
     ${drafts.length ? `<h2>Drafts to finish</h2><div class="card">${drafts.map(d => `<div class="tx" data-draft="${esc(d.id)}"><div class="l"><div class="t1">${esc(d.who)}</div><div class="t2">${esc(niceDate(d.date))} · ${d.left ? money(d.left) + ' left to assign' : 'ready to save'}</div></div><div class="amt">${money(d.total)}</div></div>`).join('')}</div>` : ''}
+    ${plan.soon.length ? `<h2>Due soon</h2><div class="card">${plan.soon.map(billRow).join('')}</div>` : ''}
     <h2>Accounts</h2><div class="card">${accRows}</div>
     <h2>Funds (whose money)</h2><div class="card">${fundRows}</div>
     ${fundDebtRows ? `<h2>Funds that owe each other</h2><div class="card">${fundDebtRows}</div>
@@ -429,6 +442,7 @@ function renderHome(v) {
   `;
   $('refresh').onclick = refresh;
   bindTxRows(v);
+  bindPlanRows(v);
   v.querySelectorAll('[data-settle]').forEach(el => el.onclick = () => {
     const [from, to, amount] = el.dataset.settle.split('|');
     formSeed = { type: 'transfer', amount, account: FUND_ACCOUNT[from], to_account: FUND_ACCOUNT[to], fund: from,
@@ -557,7 +571,7 @@ function resetForm(keepType) {
   Object.assign(form, {
     type, amount: '', account, to_account: '', fund: fundFor(account), to_fund: '',
     category: (last.cats || {})[type] || typeOf(type).cat || '', person: '', note: '', date: localDay(new Date()),
-    fee: '', rate: '', moveFund: false, fundFrom: '', settle: null, pdebt: null, viaPocket: false,
+    fee: '', rate: '', moveFund: false, fundFrom: '', settle: null, pdebt: null, viaPocket: false, planned: '',
   });
 }
 function fundFor(account) {
@@ -603,6 +617,7 @@ function renderAdd(v) {
     <form id="entry-form" autocomplete="off">
       ${chips('type', TYPES.filter(t => !t.hidden), form.type)}
       <div class="hint">${esc(type.hint)}</div>
+      ${form.planned && byId(state.planned, form.planned) ? `<div class="hint ok">Pays the planned bill “${esc(byId(state.planned, form.planned).name)}”.</div>` : ''}
 
       <label for="f-amount">Amount${cur !== 'ZAR' ? ' (' + cur + ')' : ''}</label>
       <div class="amount-wrap"><span>${SYMBOL[cur] || cur}</span>
@@ -754,6 +769,7 @@ async function saveEntry() {
     category: type.id === 'transfer' || type.id === 'opening' || type.held ? '' : form.category,
     person: form.person || '', fee: num(form.fee) || '', note: form.note.trim(),
   };
+  if (form.planned) tx.planned = form.planned;
   if (pocketMode()) pocketRow(tx);
   const btn = $('save'); btn.disabled = true; btn.textContent = 'Saving…';
   try {
@@ -767,8 +783,9 @@ async function saveEntry() {
     store.setJSON('lastEntry', last);
     if (form.account && form.fund && !form.fundFrom) { const fb = store.getJSON('fundByAccount', {}); fb[form.account] = form.fund; store.setJSON('fundByAccount', fb); }
     toast(`Saved ${money(amt, cur)}`);
+    const fromPlan = !!tx.planned;
     resetForm(type.id);
-    location.hash = '#home';
+    location.hash = fromPlan ? '#plan' : '#home';
   } catch (e) {
     btn.disabled = false; btn.textContent = 'Save';
     msg.className = 'hint err'; msg.textContent = 'Not saved: ' + e.message;
@@ -1444,6 +1461,259 @@ function openNewPerson(fund, onDone) {
 
   draw();
   setTimeout(() => { const el = $('np-name'); if (el) el.focus(); }, 50);
+}
+
+// ---------- Planned spending ----------
+// Bills: one payment on a set day (every month, or once on a date). Limits: a monthly amount for
+// spending in many small entries (diesel, snacks). "After planned" = balance minus what is still
+// planned until the end of this month.
+
+const PLAN_TYPES = ['expense', 'payment', 'gift'];
+function normPlan(p) {
+  return Object.assign({}, p, {
+    kind: p.kind === 'limit' ? 'limit' : 'bill', type: PLAN_TYPES.includes(p.type) ? p.type : 'expense',
+    repeat: p.repeat === 'once' ? 'once' : 'monthly', amount: num(p.amount), day: parseInt(p.day, 10) || 1,
+    date: toDay(p.date), active: isActive(p),
+  });
+}
+const pad2 = n => String(n).padStart(2, '0');
+const monthOf = day => (day || '').slice(0, 7);
+const lastDayOf = ym => { const [y, m] = ym.split('-').map(Number); return new Date(y, m, 0).getDate(); };
+const addDays = (day, n) => { const [y, m, d] = day.split('-').map(Number); return localDay(new Date(y, m - 1, d + n)); };
+const monthName = ym => { const [y, m] = ym.split('-').map(Number); return new Date(y, m - 1, 1).toLocaleDateString('en-ZA', { month: 'long' }); };
+// The day this month a bill is due (the 31st is the last day in shorter months).
+const dueOn = (p, ym) => p.repeat === 'once' ? p.date : `${ym}-${pad2(Math.min(p.day, lastDayOf(ym)))}`;
+const txZar = t => num(t.amount_zar) || num(t.amount);
+const spendTx = t => typeOf(t.type).dir < 0 && !isMove(t) && !pocketSettle(t);
+// A normal entry that pays this bill: same pocket, fund and category (and person, if set), and its
+// note contains the bill's name.
+const billMatch = (p, t) => spendTx(t) && t.account === p.account && t.fund === p.fund && t.category === p.category &&
+  (!p.person || t.person === p.person) && !!squash(p.name) && squash(t.note).includes(squash(p.name));
+
+function planStatus() {
+  const today = localDay(new Date()), ym = monthOf(today), soonTo = addDays(today, 7);
+  const items = state.planned.filter(p => p.active && p.amount > 0);
+  const claimed = new Set();
+  const bills = [], later = [], limits = [];
+  // Entries linked to a bill (paid from the Planned screen) first, then entries found by name.
+  const linked = id => state.txs.filter(t => t.planned === id);
+  const billList = items.filter(p => p.kind === 'bill').map(p => ({ p, due: dueOn(p, ym) }))
+    .sort((a, b) => (a.due || '').localeCompare(b.due || ''));
+  for (const b of billList) {
+    const own = linked(b.p.id).filter(t => b.p.repeat === 'once' || monthOf(t.date) === ym);
+    if (own.length) { b.paid = own[0]; own.forEach(t => claimed.add(t.id)); }
+  }
+  for (const b of billList) {
+    if (b.paid) continue;
+    const from = b.p.repeat === 'once' ? addDays(b.due || today, -14) : ym + '-01';
+    const t = state.txs.filter(t => !claimed.has(t.id) && t.date >= from && (b.p.repeat === 'once' || monthOf(t.date) === ym) && billMatch(b.p, t))
+      .sort((x, y) => x.date.localeCompare(y.date))[0];
+    if (t) { b.paid = t; claimed.add(t.id); }
+  }
+  for (const b of billList) {
+    const p = b.p;
+    if (p.repeat === 'once' && b.due && monthOf(b.due) > ym) { later.push(b); continue; }
+    // A one-off bill paid in an earlier month is done: not shown any more.
+    if (p.repeat === 'once' && b.paid && monthOf(b.paid.date) < ym) continue;
+    b.left = b.paid ? 0 : p.amount;
+    b.overdue = !b.paid && b.due < today;
+    b.soon = !b.paid && b.due <= soonTo;
+    // Stopped or failed subscriptions: not paid 5 days after the day.
+    if (!b.paid && b.due <= addDays(today, -5)) {
+      const prev = state.txs.filter(t => t.planned === p.id || billMatch(p, t)).sort((x, y) => y.date.localeCompare(x.date))[0];
+      b.flag = prev ? `Not paid yet · last paid ${niceDate(prev.date)}` : 'Not paid yet';
+    }
+    bills.push(b);
+  }
+  for (const p of items.filter(p => p.kind === 'limit')) {
+    const used = state.txs.filter(t => !claimed.has(t.id) && monthOf(t.date) === ym && spendTx(t) && t.fund === p.fund &&
+      t.category === p.category && (!p.account || t.account === p.account) && (!p.person || t.person === p.person));
+    const spent = round2(used.reduce((s, t) => s + txZar(t), 0));
+    limits.push({ p, spent, left: Math.max(0, round2(p.amount - spent)), n: used.length });
+  }
+  const byAcc = {}, byFund = {};
+  let left = 0;
+  for (const x of [...bills, ...limits]) {
+    if (!x.left) continue;
+    left += x.left;
+    if (x.p.account) byAcc[x.p.account] = (byAcc[x.p.account] || 0) + x.left;
+    byFund[x.p.fund] = (byFund[x.p.fund] || 0) + x.left;
+  }
+  return { ym, today, bills, later, limits, byAcc, byFund, left: round2(left), soon: bills.filter(b => b.soon) };
+}
+
+const planWhere = p => [p.account ? accName(p.account).replace(/^TymeBank /, 'Tyme ') : 'Any pocket', nameOf(L.funds(), p.fund),
+  p.person ? nameOf(L.people(), p.person) : ''].filter(Boolean).join(' · ');
+function billRow(b) {
+  const p = b.p;
+  const when = b.paid ? `Paid ${niceDate(b.paid.date)} ✓` : b.overdue ? `Due ${niceDate(b.due)}, overdue` : `Due ${niceDate(b.due)}`;
+  return `<div class="row tap" data-plan="${esc(p.id)}"><span class="name">${esc(p.name)}
+      <div class="muted small ${b.overdue ? 'err' : ''}">${esc(when)}</div>
+      <div class="muted small">${esc(planWhere(p))}</div>${b.flag ? `<div class="small err">${esc(b.flag)}</div>` : ''}</span>
+    <span class="amt">${money(b.paid ? txZar(b.paid) : p.amount)}${b.paid ? '' : `<div><button type="button" class="link" data-planpay="${esc(p.id)}">Pay ›</button></div>`}</span></div>`;
+}
+function bindPlanRows(v) {
+  v.querySelectorAll('[data-planpay]').forEach(el => el.onclick = e => { e.stopPropagation(); payPlanned(el.dataset.planpay); });
+  v.querySelectorAll('[data-plan]').forEach(el => el.onclick = () => editPlanned(el.dataset.plan));
+}
+// Opens the Add form filled in from the bill; saving it ticks the bill.
+function payPlanned(id) {
+  const p = byId(state.planned, id); if (!p) return;
+  formSeed = { type: p.type, amount: String(p.amount), account: p.account, fund: p.fund, category: p.category,
+    person: p.person || '', note: p.name, planned: p.id, fundFrom: '', fee: '', to_account: '', to_fund: '', moveFund: false };
+  location.hash = '#add';
+}
+
+// Repeats found in the last months' entries that are not planned yet.
+function planSuggestions() {
+  const ym = monthOf(localDay(new Date()));
+  const [y, m] = ym.split('-').map(Number);
+  const from = localDay(new Date(y, m - 4, 1));
+  const hidden = store.getJSON('planHidden', []);
+  const groups = {};
+  for (const t of state.txs) {
+    if (!t.date || t.date < from || !spendTx(t) || !t.account || !t.note || !squash(t.note) || t.planned) continue;
+    const key = [t.account, t.fund, t.category, t.person || '', squash(t.note)].join('|');
+    (groups[key] = groups[key] || []).push(t);
+  }
+  const planned = state.planned.filter(p => p.active);
+  const out = [];
+  for (const key in groups) {
+    const ts = groups[key].sort((a, b) => b.date.localeCompare(a.date));
+    const months = new Set(ts.map(t => monthOf(t.date)));
+    if (months.size < 2 || hidden.includes(key)) continue;
+    const t = ts[0], k = squash(t.note);
+    if (planned.some(p => p.fund === t.fund && p.category === t.category && (k.includes(squash(p.name)) || squash(p.name).includes(k)))) continue;
+    out.push({ key, t, months: months.size, n: ts.length });
+  }
+  return out.sort((a, b) => b.months - a.months || txZar(b.t) - txZar(a.t)).slice(0, 8);
+}
+
+function renderPlan(v) {
+  if (!state.lists) { v.innerHTML = `<header><h1>Planned</h1></header><p class="muted">${state.loading ? 'Loading…' : 'Lists not loaded yet.'}</p>`; return; }
+  const plan = planStatus();
+  const sugg = planSuggestions();
+  const limitRows = plan.limits.map(l => `<div class="row tap" data-plan="${esc(l.p.id)}"><span class="name">${esc(l.p.name)}
+      <div class="muted small">${money(l.spent)} used of ${money(l.p.amount)}</div><div class="muted small">${esc(planWhere(l.p))}</div></span>
+      <span class="amt ${l.spent > l.p.amount ? 'neg' : ''}">${l.spent > l.p.amount ? money(l.spent - l.p.amount) + '<div class="small">over</div>' : money(l.left) + '<div class="muted small">left</div>'}</span></div>`).join('');
+  const laterRows = plan.later.map(b => `<div class="row tap" data-plan="${esc(b.p.id)}"><span class="name">${esc(b.p.name)}
+      <div class="muted small">${esc(niceDate(b.due))} · ${esc(planWhere(b.p))}</div></span><span class="amt">${money(b.p.amount)}</span></div>`).join('');
+  const suggRows = sugg.map((s, i) => `<div class="row"><span class="name">${esc(s.t.note)}
+      <div class="muted small">${s.n} times in ${s.months} months · last ${money(txZar(s.t))} on ${esc(niceDate(s.t.date))}</div>
+      <div class="muted small">${esc(planWhere(s.t))}</div></span>
+      <span class="amt"><button type="button" class="link" data-sugg="${i}">Add ›</button><div><button type="button" class="link" style="color:var(--muted)" data-hide="${i}">Hide</button></div></span></div>`).join('');
+  const off = state.planned.filter(p => !p.active);
+  v.innerHTML = `
+    <header><h1>Planned</h1><button class="refresh" id="plan-new">+ New</button></header>
+    ${state.plannedErr ? `<p class="err small">${esc(state.plannedErr)}</p>` : ''}
+    <div class="total-box"><div class="small">Still planned to the end of ${esc(monthName(plan.ym))}</div><div class="big">${money(plan.left)}</div></div>
+    <h2>Bills</h2><div class="card">${plan.bills.length ? plan.bills.map(billRow).join('') : '<div class="empty small">No bills yet. Tap + New, or add one from the suggestions.</div>'}</div>
+    ${limitRows ? `<h2>Limits this month</h2><div class="card">${limitRows}</div>` : ''}
+    ${laterRows ? `<h2>Later</h2><div class="card">${laterRows}</div>` : ''}
+    ${suggRows ? `<h2>Repeats in your entries</h2><div class="card">${suggRows}</div><div class="hint">Found in the last months. Add one as a monthly bill.</div>` : ''}
+    ${off.length ? `<h2>Stopped</h2><div class="card">${off.map(p => `<div class="row tap" data-plan="${esc(p.id)}"><span class="name muted">${esc(p.name)}</span><span class="amt muted">${money(p.amount)}</span></div>`).join('')}</div>` : ''}`;
+  $('plan-new').onclick = () => { planForm = newPlanForm(); location.hash = '#plan/edit'; };
+  bindPlanRows(v);
+  v.querySelectorAll('[data-sugg]').forEach(el => el.onclick = () => {
+    const t = sugg[+el.dataset.sugg].t;
+    planForm = Object.assign(newPlanForm(), { name: t.note, amount: String(txZar(t)), account: t.account, fund: t.fund,
+      category: t.category, person: t.person || '', type: PLAN_TYPES.includes(t.type) ? t.type : 'expense', day: String(+t.date.slice(8)) });
+    location.hash = '#plan/edit';
+  });
+  v.querySelectorAll('[data-hide]').forEach(el => el.onclick = () => {
+    const h = store.getJSON('planHidden', []); h.push(sugg[+el.dataset.hide].key); store.setJSON('planHidden', h); renderPlan(v);
+  });
+}
+
+// ---------- New or edit a planned item ----------
+
+let planForm = null;
+function newPlanForm() {
+  const acc = postable().find(a => a.id === 'tyme-ratna') ? 'tyme-ratna' : ((postable()[0] || {}).id || '');
+  return { id: '', kind: 'bill', name: '', amount: '', account: acc, fund: fundFor(acc), category: '', person: '',
+    type: 'expense', repeat: 'monthly', day: '', date: '', active: true, note: '' };
+}
+function editPlanned(id) {
+  const p = byId(state.planned, id); if (!p) return;
+  planForm = Object.assign({}, p, { amount: String(p.amount), day: String(p.day) });
+  location.hash = '#plan/edit';
+}
+function renderPlanEdit(v) {
+  if (!planForm) planForm = newPlanForm();
+  const P = planForm, bill = P.kind === 'bill';
+  const accs = postable().filter(a => accCurrency(a.id) === 'ZAR').map(a => ({ id: a.id, name: a.parent ? accName(a.id).replace(/^TymeBank /, 'Tyme ') : a.name }));
+  const cats = L.categories().filter(isActive).filter(c => String(c.kind || 'both') !== 'income');
+  v.innerHTML = `
+    <header><h1>${P.id ? 'Edit planned' : 'New planned'}</h1></header>
+    <form id="plan-form" autocomplete="off">
+      ${chips('kind', [{ id: 'bill', name: 'Bill' }, { id: 'limit', name: 'Limit' }], P.kind)}
+      <div class="hint">${bill ? 'One payment on a set day, like Obsidian or data.' : 'A monthly amount for many small entries, like diesel or snacks.'}</div>
+      <label for="p-name">Name</label>
+      <input id="p-name" placeholder="${bill ? 'e.g. Obsidian' : 'e.g. Diesel'}" value="${esc(P.name)}">
+      ${bill ? '<div class="hint">An entry whose note has this name ticks the bill by itself.</div>' : ''}
+      <label for="p-amount">${bill ? 'Amount' : 'Limit per month'}</label>
+      <div class="amount-wrap small-amt"><span>R</span><input id="p-amount" inputmode="decimal" placeholder="0.00" value="${esc(P.amount)}"></div>
+      ${bill ? `<div class="lbl">When</div>${chips('repeat', [{ id: 'monthly', name: 'Every month' }, { id: 'once', name: 'Once' }], P.repeat)}
+        ${P.repeat === 'once' ? `<label for="p-date">Date</label><input id="p-date" type="date" value="${esc(P.date)}">`
+          : `<label for="p-day">Day of the month</label><input id="p-day" inputmode="numeric" placeholder="e.g. 25" value="${esc(P.day)}">`}` : ''}
+      <div class="lbl">Paid from</div>${chips('account', accs, P.account, bill ? {} : { none: 'Any pocket' })}
+      <div class="lbl">Fund (whose money)</div>${chips('fund', L.funds().filter(isActive), P.fund)}
+      <div class="lbl">Category</div>${chips('category', cats, P.category)}
+      ${bill ? `<div class="lbl">Pay as</div>${chips('type', PLAN_TYPES.map(typeOf), P.type)}` : ''}
+      <div class="lbl">Person (optional)</div>${chips('person', L.people().filter(isActive), P.person, { none: 'No one' })}
+      ${P.id ? `<div class="hint"><label style="display:flex;gap:8px;align-items:center;margin:0;color:inherit"><input type="checkbox" id="p-active" style="width:auto" ${P.active ? 'checked' : ''}> Still planned (untick when it stops)</label></div>` : ''}
+      <button class="primary" id="p-save" type="submit">Save</button>
+      ${P.id ? '<button type="button" class="ghost danger" id="p-del">Delete</button>' : ''}
+      <button type="button" class="ghost" id="p-cancel">Cancel</button>
+      <p id="p-msg" class="hint"></p>
+    </form>`;
+  const sync = () => {
+    P.name = $('p-name').value; P.amount = $('p-amount').value;
+    if ($('p-day')) P.day = $('p-day').value;
+    if ($('p-date')) P.date = $('p-date').value;
+    if ($('p-active')) P.active = $('p-active').checked;
+  };
+  $('plan-form').querySelectorAll('.chips').forEach(group => group.onclick = e => {
+    const btn = e.target.closest('.chip'); if (!btn) return;
+    sync();
+    const name = group.dataset.name, val = btn.dataset.v;
+    if (name === 'person') P.person = P.person === val ? '' : val;
+    else P[name] = val;
+    if (name === 'account' && val) P.fund = fundFor(val);
+    if (name === 'kind' && val === 'bill' && !P.account) P.account = newPlanForm().account;
+    renderPlanEdit(v);
+  });
+  $('p-cancel').onclick = () => { location.hash = '#plan'; };
+  $('plan-form').onsubmit = async e => {
+    e.preventDefault(); sync();
+    const msg = $('p-msg'), day = parseInt(P.day, 10);
+    const problem = !P.name.trim() ? 'Enter a name.' : !(num(P.amount) > 0) ? 'Enter an amount.'
+      : bill && P.repeat === 'monthly' && !(day >= 1 && day <= 31) ? 'Enter a day from 1 to 31.'
+      : bill && P.repeat === 'once' && !P.date ? 'Pick a date.'
+      : bill && !P.account ? 'Pick where it is paid from.' : !P.fund ? 'Pick a fund.' : !P.category ? 'Pick a category.' : '';
+    if (problem) { msg.className = 'hint err'; msg.textContent = problem; return; }
+    const row = { id: P.id || '', name: P.name.trim(), kind: P.kind, type: bill ? P.type : '', amount: num(P.amount),
+      account: P.account || '', fund: P.fund, category: P.category, person: P.person || '',
+      repeat: bill ? P.repeat : 'monthly', day: bill && P.repeat === 'monthly' ? day : '', date: bill && P.repeat === 'once' ? P.date : '',
+      active: P.active !== false, note: P.note || '' };
+    const btn = $('p-save'); btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const saved = normPlan(await api('savePlanned', row));
+      state.planned = state.planned.filter(p => p.id !== saved.id).concat([saved]); store.setJSON('cachePlanned', state.planned);
+      toast(`Saved ${saved.name}`); planForm = null; location.hash = '#plan';
+    } catch (err) {
+      btn.disabled = false; btn.textContent = 'Save';
+      msg.className = 'hint err'; msg.textContent = 'Not saved: ' + needsNewScript(err);
+    }
+  };
+  if ($('p-del')) $('p-del').onclick = async () => {
+    if (!confirm(`Delete “${P.name}”? To keep its history, untick "Still planned" instead.`)) return;
+    try {
+      await api('deletePlanned', { id: P.id });
+      state.planned = state.planned.filter(p => p.id !== P.id); store.setJSON('cachePlanned', state.planned);
+      toast('Deleted'); planForm = null; location.hash = '#plan';
+    } catch (err) { toast('Not deleted: ' + needsNewScript(err), true); }
+  };
 }
 
 // ---------- Settings ----------
