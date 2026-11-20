@@ -1,7 +1,7 @@
 // Accounting app: quick entry, split payments, balances home screen, entry list, new people.
 'use strict';
 
-const VERSION = '0.6.7';
+const VERSION = '0.7.0';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -98,6 +98,12 @@ const TYPES = [
   { id: 'repayment', label: 'Got back',  dir: +1, person: -1, hint: 'Someone pays you back. Their debt goes down.' },
   { id: 'borrow',    label: 'Borrowed',  dir: +1, person: -1, hint: 'You borrow money. You will owe them.' },
   { id: 'payback',   label: 'Paid back', dir: -1, person: +1, hint: 'You pay back what you borrowed.' },
+  // Money someone gives you to buy things for them (on the City Deep card). It stays theirs:
+  // not income, not a loan. "Bought for" spends it for them.
+  { id: 'keep',      label: 'Kept for',  dir: +1, who: true, held: +1,
+    hint: 'Someone gives you money to buy things for them. It stays theirs: not income, not a loan.' },
+  { id: 'keep_used', label: 'Bought for', dir: -1, who: true, held: -1,
+    hint: 'You bought things for someone with the money you keep for them. It is not your spending.' },
   { id: 'paid_for_me', label: 'Paid for me', dir: -1, person: -1, noCash: true, cat: 'groceries',
     hint: 'Someone bought something for you with their own money. You owe them, and the cost counts as spending. No cash moves.' },
   { id: 'opening',   label: 'Opening',   dir: +1, hint: 'Starting balance of an account, or what a person owes a fund (minus if the fund owes them).' },
@@ -149,8 +155,9 @@ function effects(t) {
   // Fees are always in rand.
   const feeZar = fee;
   const feeAcc = accCurrency(t.account) === 'ZAR' ? fee : fee / rate;
-  const acc = {}, fund = {}, person = {};
+  const acc = {}, fund = {}, person = {}, held = {};
   const add = (o, k, v) => { if (k) o[k] = (o[k] || 0) + v; };
+  if (type.held && t.person && t.account) add(held, t.person + '|' + t.account + '|' + (t.fund || ''), type.held * zar);
 
   if (type.id === 'fund_transfer') {
     add(fund, t.fund, -zar); add(fund, t.to_fund, zar);
@@ -176,16 +183,17 @@ function effects(t) {
     if (pocketSettle(t)) { add(acc, t.to_account, -type.dir * amt); add(fund, t.to_fund || t.fund, -type.dir * zar); }
     if (type.person && t.person) add(person, t.person + '|' + (t.fund || ''), type.person * zar);
   }
-  return { acc, fund, person, zar, feeZar };
+  return { acc, fund, person, held, zar, feeZar };
 }
 
 function balances() {
-  const acc = {}, fund = {}, person = {};
+  const acc = {}, fund = {}, person = {}, held = {};
   const merge = (to, from) => { for (const k in from) to[k] = (to[k] || 0) + from[k]; };
-  for (const t of state.txs) { const e = effects(t); merge(acc, e.acc); merge(fund, e.fund); merge(person, e.person); }
+  for (const t of state.txs) { const e = effects(t); merge(acc, e.acc); merge(fund, e.fund); merge(person, e.person); merge(held, e.held); }
   // Round to cents so tiny floating-point leftovers don't show as red −R0.00.
-  for (const o of [acc, fund, person]) for (const k in o) o[k] = Math.round(o[k] * 100) / 100 || 0;
-  return { acc, fund, person, owed: owedByPerson(person) };
+  for (const o of [acc, fund, person, held]) for (const k in o) o[k] = Math.round(o[k] * 100) / 100 || 0;
+  // held: money you keep for someone, by 'person|account|fund' (Kept for − Bought for).
+  return { acc, fund, person, held, owed: owedByPerson(person) };
 }
 
 // Person debts, grouped by person, each split by the fund it belongs to.
@@ -350,13 +358,18 @@ function renderHome(v) {
         if (r) { totalZar += x * r; extra = `<div class="muted small">≈ ${money(x * r)}</div>`; }
         else if (x) missingRate = true;
       } else totalZar += x;
+      const kept = Object.keys(b.held).filter(k => k.split('|')[1] === a.id).reduce((s, k) => s + b.held[k], 0);
+      if (kept > 0.004) extra += `<div class="muted small">${money(kept)} kept for others</div>`;
       accRows += `<div class="row"><span class="name">${esc(a.name)}</span><span class="amt ${x < 0 ? 'neg' : ''}">${money(x, cur)}${extra}</span></div>`;
     }
   }
 
   const fundRows = L.funds().filter(f => isActive(f) || Math.abs(b.fund[f.id] || 0) > 0.004).map(f => {
     const x = b.fund[f.id] || 0;
-    return `<div class="row"><span class="name">${esc(f.name)}</span><span class="amt ${x < 0 ? 'neg' : ''}">${money(x)}</span></div>`;
+    // Personal also holds money kept for people without a fund of their own (Ana's R100).
+    const kept = f.id !== 'personal' ? 0 : Object.keys(b.held).filter(k => k.split('|')[2] === f.id).reduce((s, k) => s + b.held[k], 0);
+    const extra = kept > 0.004 ? `<div class="muted small">${money(kept)} kept for others</div>` : '';
+    return `<div class="row"><span class="name">${esc(f.name)}</span><span class="amt ${x < 0 ? 'neg' : ''}">${money(x)}${extra}</span></div>`;
   }).join('');
 
   // Each debt belongs to a fund: "School owes Dada K's feeding program R1,049".
@@ -382,6 +395,12 @@ function renderHome(v) {
     return `<div class="row"><span class="name">${esc(nameOf(L.funds(), d.from))} <span class="muted small">owes ${esc(fundLabel(d.to))}</span></span>
       <span class="amt">${money(d.amount)}${can ? `<div><button class="link" data-settle="${esc(d.from)}|${esc(d.to)}|${d.amount}">Pay back ›</button></div>` : ''}</span></div>`;
   }).join('');
+  // Money you keep for others (Kept for − Bought for), e.g. on the City Deep card.
+  const keptRows = Object.keys(b.held).filter(k => Math.abs(b.held[k]) > 0.004).map(k => {
+    const [pid, aid, fid] = k.split('|'), x = b.held[k];
+    return `<div class="row tap" data-held="${esc(k)}"><span class="name">${esc(nameOf(L.people(), pid))} <span class="muted small">${x > 0 ? 'on' : 'spent more than kept on'} ${esc(nameOf(L.accounts(), aid))}</span></span>
+      <span class="amt ${x < 0 ? 'neg' : ''}">${money(Math.abs(x))}<div><button type="button" class="link">Bought for ›</button></div></span></div>`;
+  }).join('');
   const all = Object.values(b.person);
   const owesMe = all.filter(x => x > 0).reduce((s, x) => s + x, 0);
   const iOwe = all.filter(x => x < 0).reduce((s, x) => s - x, 0);
@@ -403,6 +422,8 @@ function renderHome(v) {
     ${fundDebtRows ? `<h2>Funds that owe each other</h2><div class="card">${fundDebtRows}</div>
       <div class="hint">When one fund's money pays for another fund, the other fund owes it back.</div>` : ''}
     <h2>People</h2><div class="card">${peopleRows}</div>
+    ${keptRows ? `<h2>Kept for others</h2><div class="card">${keptRows}</div>
+      <div class="hint">Money people gave you to buy things for them. It is theirs until you buy it.</div>` : ''}
     <h2>Recent</h2><div class="card">${recent.length ? recent.map(itemRow).join('') : '<div class="empty small">No entries yet. Tap + to add one.</div>'}</div>
     ${recent.length ? '<p><a class="link" href="#list">All entries ›</a></p>' : ''}
   `;
@@ -420,6 +441,14 @@ function renderHome(v) {
     startPersonSettle(pid, fid, b.person[pid + '|' + fid] || 0, amount);
   });
   v.querySelectorAll('[data-draft]').forEach(el => el.onclick = () => { location.hash = '#split/draft/' + encodeURIComponent(el.dataset.draft); });
+  v.querySelectorAll('[data-held]').forEach(el => el.onclick = () => {
+    const [pid, aid, fid] = el.dataset.held.split('|');
+    const x = b.held[el.dataset.held] || 0;
+    formSeed = { type: 'keep_used', amount: x > 0 ? String(x) : '', account: aid, person: pid,
+      fund: fid || fundFor(aid), fundFrom: pid, category: '', fee: '', to_account: '', to_fund: '', moveFund: false,
+      note: `Bought for ${nameOf(L.people(), pid)}` };
+    location.hash = '#add';
+  });
 }
 
 // ---------- Settle a person's debt ----------
@@ -459,7 +488,7 @@ function txTitle(t) {
   if (type.id === 'fund_transfer') return `${nameOf(L.funds(), t.fund)} → ${nameOf(L.funds(), t.to_fund)}`;
   if (isMove(t)) return `${accName(t.account)} → ${accName(t.to_account)}`;
   if (pocketSettle(t)) return `${type.label} · ${nameOf(L.people(), t.person)}`;
-  if (type.person && t.person) return `${type.label} · ${nameOf(L.people(), t.person)}`;
+  if ((type.person || type.held) && t.person) return `${type.label} · ${nameOf(L.people(), t.person)}`;
   return nameOf(L.categories(), t.category) || type.label;
 }
 // "Tyme Dada Ratna → Tyme Dada Guna": where the money went for a pocket settle.
@@ -501,11 +530,11 @@ function itemRow(it) {
   const rows = groupRows(it.g), cash = cashRows(rows);
   if (cash.length === 1 && rows.length === 1) return txRow(cash[0]);
   const first = cash[0] || rows[0];
-  const out = typeOf(first.type).dir < 0;
+  const out = groupOut(cash);
   const total = cash.reduce((s, x) => s + num(x.amount), 0);
   const notes = [...new Set(cash.map(x => x.note || ''))];
   const title = first.paid_to ? `${out ? 'To' : 'From'} ${nameOf(L.people(), first.paid_to)}` : (notes.length === 1 && notes[0]) || 'Split payment';
-  const bits = [niceDate(first.date), nameOf(L.accounts(), topOf(first.account)), `${cash.length} part${cash.length === 1 ? '' : 's'}`];
+  const bits = [niceDate(first.date), nameOf(L.accounts(), topOf(rowAcc(first))), `${cash.length} part${cash.length === 1 ? '' : 's'}`];
   return `<div class="tx" data-gid="${esc(it.g)}"><div class="l"><div class="t1">${esc(title)}</div><div class="t2">${esc(bits.join(' · '))}</div></div>
     <div class="amt ${out ? '' : 'in'}">${out ? '−' : '+'}${money(total)}</div></div>`;
 }
@@ -594,10 +623,11 @@ function renderAdd(v) {
       ${chips('fund', funds, form.fund, isOpening ? { none: 'None' } : {})}
       ${form.fundFrom && form.fundFrom === form.person ? `<div class="hint">Last used with ${esc(nameOf(L.people(), form.person))}.</div>` : ''}
       ${fundNote()}
+      ${type.held ? `<div class="hint">${HELD_FUND_HINT}</div>` : ''}
       ${isTransfer ? `<div class="hint"><label style="display:flex;gap:8px;align-items:center;margin:0;color:inherit"><input type="checkbox" id="f-movefund" style="width:auto" ${form.moveFund ? 'checked' : ''}> Money also changes fund</label></div>
         ${form.moveFund ? `<div class="lbl">To fund</div>${chips('to_fund', funds.filter(f => f.id !== form.fund), form.to_fund)}` : ''}` : ''}
 
-      ${!isTransfer && !isOpening && !viaPocket ? `<div class="lbl">Category</div>${chips('category', cats, form.category, type.person ? { none: 'None' } : {})}` : ''}
+      ${!isTransfer && !isOpening && !viaPocket && !type.held ? `<div class="lbl">Category</div>${chips('category', cats, form.category, type.person ? { none: 'None' } : {})}` : ''}
 
       ${!type.person && !type.who && !isOpening && !isTransfer ? `<div class="lbl">Person (optional)</div>${chips('person', people, form.person, { none: 'No one', add: true })}` : ''}
 
@@ -702,7 +732,7 @@ function validate() {
     if (form.moveFund && !form.to_fund) return 'Pick the fund it moves to.';
   }
   if ((type.person || type.who) && !form.person) return 'Pick the person.';
-  if (!type.person && type.id !== 'transfer' && !form.category) return 'Pick a category.';
+  if (!type.person && !type.held && type.id !== 'transfer' && !form.category) return 'Pick a category.';
   const cur = accCurrency(form.account);
   const needRate = cur !== 'ZAR' || (type.id === 'transfer' && form.to_account && accCurrency(form.to_account) !== cur);
   if (needRate && !num(form.rate)) return 'Enter the exchange rate.';
@@ -721,7 +751,7 @@ async function saveEntry() {
     rate: rate || '', amount_zar: cur === 'ZAR' ? amt : Math.round(amt * rate * 100) / 100,
     account: form.account, to_account: type.id === 'transfer' ? (form.to_account || form.account) : '',
     fund: form.fund, to_fund: type.id === 'transfer' && form.moveFund ? form.to_fund : '',
-    category: type.id === 'transfer' || type.id === 'opening' ? '' : form.category,
+    category: type.id === 'transfer' || type.id === 'opening' || type.held ? '' : form.category,
     person: form.person || '', fee: num(form.fee) || '', note: form.note.trim(),
   };
   if (pocketMode()) pocketRow(tx);
@@ -756,9 +786,17 @@ function pocketRow(tx) {
 // One bank or cash payment made of parts. Each part is saved as its own row (so balances and
 // reports work as before), and all rows of one payment share a group_id.
 
-const PART_TYPES = { out: ['expense', 'payment', 'gift', 'advance', 'loan', 'bring_back', 'payback'], in: ['income', 'repayment', 'borrow'] };
-const SPLIT_TYPES = new Set([...PART_TYPES.out, ...PART_TYPES.in]);
-const PART_LABEL = { expense: 'Spent', income: 'Income' };
+const PART_TYPES = { out: ['expense', 'payment', 'gift', 'advance', 'loan', 'bring_back', 'payback', 'keep_used'],
+  in: ['income', 'keep', 'transfer', 'repayment', 'borrow'] };
+const SPLIT_TYPES = new Set([...PART_TYPES.out, ...PART_TYPES.in].filter(id => id !== 'transfer'));
+const PART_LABEL = { expense: 'Spent', income: 'Income', transfer: 'My own money' };
+const HELD_FUND_HINT = 'Fund: whose money it is. Pick their fund if they have one (Dada Guna, Agricoop); otherwise keep Personal.';
+// A "My own money" part is a transfer row: from another account (e.g. Cash ZAR) into this one.
+// Its account is where the money came from, so the payment's own account is its to_account.
+const rowAcc = t => t.type === 'transfer' ? t.to_account : t.account;
+const groupOut = cash => { const t = cash.find(x => x.type !== 'transfer'); return !!t && typeOf(t.type).dir < 0; };
+// Where "My own money" can come from: rand accounts and pockets other than this payment's account.
+const ownFrom = () => postable().filter(a => accCurrency(a.id) === 'ZAR' && topOf(a.id) !== split.account);
 const round2 = x => Math.round(x * 100) / 100;
 const topOf = id => { const a = byId(L.accounts(), id); return a && a.parent ? a.parent : (id || ''); };
 // "From" choices: rand accounts that hold money (TymeBank, Cash ZAR, …).
@@ -780,7 +818,7 @@ function newPart() {
   const pocket = (pockets.find(p => !used.includes(p.id)) || pockets[0] || {}).id || '';
   const type = split.mode === 'in' ? 'income' : 'expense';
   const pf = split.paid_to ? personFund(split.paid_to) : '';
-  return { type, amount: '', pocket, fund: pf || fundFor(pocket), fundFrom: pf ? split.paid_to : '', category: '', person: split.paid_to || '', advance: '', note: '' };
+  return { type, amount: '', pocket, fund: pf || fundFor(pocket), fundFrom: pf ? split.paid_to : '', category: '', person: split.paid_to || '', advance: '', note: '', from: '' };
 }
 
 function startSplit(args) {
@@ -819,17 +857,18 @@ function fromRows(rows) {
   const cash = cashRows(rows), adv = rows.filter(t => t.type === 'advance_used');
   const notes = [...new Set(cash.map(t => t.note || ''))];
   const common = notes.length === 1 ? notes[0] : '';
-  const parts = cash.map(t => ({ type: t.type, amount: String(num(t.amount)), pocket: t.account, fund: t.fund,
-    category: t.category || '', person: t.person || '', advance: '', note: common ? '' : (t.note || '') }));
+  const parts = cash.map(t => ({ type: t.type, amount: String(num(t.amount)), pocket: rowAcc(t), fund: t.fund,
+    category: t.category || '', person: t.person || '', advance: '', note: common ? '' : (t.note || ''),
+    from: t.type === 'transfer' ? t.account : '' }));
   for (const a of adv) {
     const p = parts.find(p => p.type === 'payment' && p.person === a.person && p.fund === a.fund && !p.advance);
     if (p) p.advance = String(num(a.amount));
   }
   const feeIdx = cash.findIndex(t => num(t.fee));
   return {
-    mode: typeOf(cash[0].type).dir > 0 ? 'in' : 'out',
+    mode: groupOut(cash) ? 'out' : 'in',
     total: String(round2(cash.reduce((s, t) => s + num(t.amount), 0))),
-    date: rows[0].date, account: topOf(cash[0].account), paid_to: rows[0].paid_to || '', note: common,
+    date: rows[0].date, account: topOf(rowAcc(cash[0])), paid_to: rows[0].paid_to || '', note: common,
     fee: feeIdx >= 0 ? String(num(cash[feeIdx].fee)) : '', fee_part: Math.max(feeIdx, 0),
     parts, editGroup: rows[0].group_id || '', editIds: rows.map(t => t.id), open: null,
   };
@@ -854,7 +893,8 @@ function updateLeft() {
 function partSummary(p) {
   const type = typeOf(p.type);
   const what = type.person || type.who ? (PART_LABEL[p.type] || type.label) : (nameOf(L.categories(), p.category) || PART_LABEL[p.type] || type.label);
-  const bits = [nameOf(L.accounts(), p.pocket), nameOf(L.funds(), p.fund), what, p.person ? nameOf(L.people(), p.person) : ''];
+  const where = p.type === 'transfer' ? `From ${accName(p.from) || '?'}` : nameOf(L.accounts(), p.pocket);
+  const bits = [where, nameOf(L.funds(), p.fund), what, p.person ? nameOf(L.people(), p.person) : ''];
   return { amt: num(p.amount), line: bits.filter(Boolean).join(' · '),
     extra: num(p.advance) ? `earned ${money(num(p.amount) + num(p.advance))} − advance ${money(num(p.advance))}` : (p.note || '') };
 }
@@ -880,7 +920,7 @@ function renderSplit(v, args) {
         <div class="t2">${esc(s.line)}${s.extra ? '<br>' + esc(s.extra) : ''}</div></div>
         ${split.parts.length > 1 ? `<button type="button" class="x" data-remove="${i}" aria-label="Remove part">×</button>` : ''}</div>`;
     }
-    const type = typeOf(p.type);
+    const type = typeOf(p.type), isOwn = p.type === 'transfer';
     const cats = L.categories().filter(isActive).filter(c => { const k = String(c.kind || 'both'); return k === 'both' || (out ? k === 'expense' : k === 'income'); });
     const owed = p.person ? (b.person[p.person + '|' + (p.fund || '')] || 0) : 0;
     const showAdv = p.type === 'payment' && p.person && (owed > 0 || num(p.advance));
@@ -890,10 +930,12 @@ function renderSplit(v, args) {
       <button type="button" class="link" id="fill-rest">Fill the rest</button>
       ${pockets.length > 1 ? `<div class="lbl">Pocket</div>${chips('pocket', pockets, p.pocket)}` : ''}
       <div class="lbl">What</div>${chips('ptype', typeItems, p.type)}
-      <div class="hint">${esc(type.hint || '')}</div>
+      <div class="hint">${esc(isOwn ? 'Your own money put in from another account. The fee can be paid from it too.' : (type.hint || ''))}</div>
+      ${isOwn ? `<div class="lbl">From</div>${chips('from', ownFrom().map(a => ({ id: a.id, name: accName(a.id).replace(/^TymeBank /, 'Tyme ') })), p.from)}` : `
       <div class="lbl">Person${type.person || type.who ? '' : ' (optional)'}</div>${chips('person', people, p.person, type.person || type.who ? { add: true } : { none: 'No one', add: true })}
-      ${type.person ? '' : `<div class="lbl">Category</div>${chips('category', cats, p.category)}`}
+      ${type.person || type.held ? '' : `<div class="lbl">Category</div>${chips('category', cats, p.category)}`}`}
       <div class="lbl">Fund (whose money)</div>${chips('fund', funds, p.fund)}
+      ${type.held ? `<div class="hint">${HELD_FUND_HINT}</div>` : ''}
       ${p.fundFrom && p.fundFrom === p.person ? `<div class="hint">Last used with ${esc(nameOf(L.people(), p.person))}.</div>` : ''}
       ${showAdv ? `<label for="p-advance">Advance deducted (R)</label>
         <input id="p-advance" inputmode="decimal" placeholder="0.00" value="${esc(p.advance)}">
@@ -904,7 +946,7 @@ function renderSplit(v, args) {
     </div>`;
   };
 
-  const feePockets = split.parts.map((p, i) => ({ id: String(i), label: `${i + 1}. ${nameOf(L.accounts(), p.pocket)}` }));
+  const feePockets = split.parts.map((p, i) => ({ id: String(i), label: `${i + 1}. ${p.type === 'transfer' ? accName(p.from) || 'My own money' : nameOf(L.accounts(), p.pocket)}` }));
   v.innerHTML = `
     <header><h1>${split.editGroup || split.editIds ? 'Edit payment' : 'Split payment'}</h1></header>
     <form id="split-form" autocomplete="off">
@@ -1004,11 +1046,19 @@ function renderSplit(v, args) {
     } else if (name === 'fee_part') {
       split.fee_part = Number(val);
     } else if (p) {
-      if (name === 'pocket') { p.pocket = val; if (!(p.fundFrom && p.fundFrom === p.person)) p.fund = fundFor(val); }
+      if (name === 'pocket') { p.pocket = val; if (p.type !== 'transfer' && !(p.fundFrom && p.fundFrom === p.person)) p.fund = fundFor(val); }
+      else if (name === 'from') { p.from = val; p.fund = fundFor(val); }
       else if (name === 'ptype') {
         p.type = val; const t = typeOf(val);
-        if (t.cat) p.category = t.cat; else if (t.person) p.category = '';
+        if (t.cat) p.category = t.cat; else if (t.person || t.held) p.category = '';
         if (val !== 'payment') p.advance = '';
+        if (val === 'transfer') {
+          // My own money: from Cash ZAR (or the first other account), Personal, no person; it pays the fee.
+          const own = ownFrom();
+          p.from = p.from || ((own.find(a => a.id === 'cash-zar') || own[0] || {}).id || '');
+          p.person = ''; p.category = ''; p.fund = fundFor(p.from); p.fundFrom = '';
+          split.fee_part = split.open;
+        }
       } else if (name === 'person') { p.person = p.person === val && !(typeOf(p.type).person || typeOf(p.type).who) ? '' : val; usePersonFund(p); }
       else { p[name] = val; if (name === 'fund') p.fundFrom = ''; }
     }
@@ -1035,8 +1085,12 @@ function validateSplit() {
     if (!(num(p.amount) > 0)) return n + 'enter an amount.';
     if (!p.pocket) return n + 'pick the pocket.';
     if (!p.fund) return n + 'pick the fund.';
+    if (p.type === 'transfer') {
+      if (!p.from || topOf(p.from) === split.account) return n + 'pick where your money came from.';
+      continue;
+    }
     if ((t.person || t.who) && !p.person) return n + 'pick the person.';
-    if (!t.person && !p.category) return n + 'pick a category.';
+    if (!t.person && !t.held && !p.category) return n + 'pick a category.';
     if (num(p.advance) < 0) return n + 'the advance can\'t be negative.';
   }
   const left = splitLeft();
@@ -1052,7 +1106,10 @@ function splitRows() {
     const base = { date: split.date, currency: 'ZAR', rate: '', fund: p.fund, to_account: '', to_fund: '',
       category: typeOf(p.type).person && !p.category ? '' : p.category, person: p.person || '',
       paid_to: split.paid_to || '', source: 'app' };
-    rows.push(Object.assign({}, base, { type: p.type, amount: amt, amount_zar: amt, account: p.pocket,
+    const own = p.type === 'transfer';
+    rows.push(Object.assign({}, base, { type: p.type, amount: amt, amount_zar: amt,
+      account: own ? p.from : p.pocket, to_account: own ? p.pocket : '',
+      category: own || typeOf(p.type).held ? '' : base.category, person: own ? '' : base.person,
       fee: i === (split.fee_part || 0) && num(split.fee) ? round2(num(split.fee)) : '',
       note: (p.note || split.note || '').trim() }));
     const adv = round2(num(p.advance));
@@ -1080,7 +1137,7 @@ async function savePayment() {
     store.setJSON('cacheTxs', state.txs);
     if (split.draftId) { state.drafts = state.drafts.filter(d => d.id !== split.draftId); store.setJSON('cacheDrafts', state.drafts); }
     const fb = store.getJSON('fundByAccount', {});
-    split.parts.forEach(p => { if (p.pocket && p.fund && !p.fundFrom) fb[p.pocket] = p.fund; });
+    split.parts.forEach(p => { if (p.pocket && p.fund && !p.fundFrom && p.type !== 'transfer' && !typeOf(p.type).held) fb[p.pocket] = p.fund; });
     store.setJSON('fundByAccount', fb);
     toast(`Saved ${money(num(split.total))}`);
     split.ready = false;
@@ -1123,7 +1180,7 @@ function renderPay(v, gid) {
   const rows = groupRows(gid);
   if (!rows.length) { v.innerHTML = '<header><h1>Payment</h1></header><p class="muted">Payment not found.</p><p><a class="link" href="#home">‹ Home</a></p>'; return; }
   const cash = cashRows(rows), adv = rows.filter(t => t.type === 'advance_used');
-  const out = typeOf(cash[0].type).dir < 0;
+  const out = groupOut(cash);
   const total = cash.reduce((s, t) => s + num(t.amount), 0);
   const fee = cash.reduce((s, t) => s + num(t.fee), 0);
   const b = balances();
@@ -1132,7 +1189,7 @@ function renderPay(v, gid) {
     const type = typeOf(t.type);
     const a = adv.find(x => x.person === t.person && x.fund === t.fund && t.type === 'payment');
     const what = type.person || type.who ? (PART_LABEL[t.type] || type.label) : (nameOf(L.categories(), t.category) || PART_LABEL[t.type] || type.label);
-    const bits = [nameOf(L.accounts(), t.account), nameOf(L.funds(), t.fund), what, t.person ? nameOf(L.people(), t.person) : ''].filter(Boolean);
+    const bits = [t.type === 'transfer' ? `From ${accName(t.account)}` : nameOf(L.accounts(), t.account), nameOf(L.funds(), t.fund), what, t.person ? nameOf(L.people(), t.person) : ''].filter(Boolean);
     const owed = t.person ? (b.person[t.person + '|' + t.fund] || 0) : 0;
     const back = t.type === 'bring_back' && owed > 0 ? Math.min(owed, num(t.amount)) : 0;
     return `<div class="part"><div class="l"><div class="t1">${i + 1}. ${money(num(t.amount))}</div>
@@ -1147,7 +1204,7 @@ function renderPay(v, gid) {
     <div class="card pad"><dl>
       <dt>Total</dt><dd><b>${money(total)}</b>${fee ? ` + fee ${money(fee)}` : ''}</dd>
       <dt>Date</dt><dd>${esc(niceDate(rows[0].date))}</dd>
-      <dt>${out ? 'From' : 'Into'}</dt><dd>${esc(nameOf(L.accounts(), topOf(cash[0].account)))}</dd>
+      <dt>${out ? 'From' : 'Into'}</dt><dd>${esc(nameOf(L.accounts(), topOf(rowAcc(cash[0]))))}</dd>
       ${rows[0].paid_to ? `<dt>${out ? 'Paid to' : 'Received from'}</dt><dd>${esc(nameOf(L.people(), rows[0].paid_to))}</dd>` : ''}
       ${notes.length === 1 && notes[0] ? `<dt>Note</dt><dd>${esc(notes[0])}</dd>` : ''}
     </dl></div>
