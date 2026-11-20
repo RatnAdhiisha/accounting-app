@@ -1,7 +1,7 @@
 // Accounting app: quick entry, split payments, balances home screen, entry list, new people, planned spending.
 'use strict';
 
-const VERSION = '0.8.0';
+const VERSION = '0.8.1';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -617,7 +617,7 @@ function renderAdd(v) {
     <form id="entry-form" autocomplete="off">
       ${chips('type', TYPES.filter(t => !t.hidden), form.type)}
       <div class="hint">${esc(type.hint)}</div>
-      ${form.planned && byId(state.planned, form.planned) ? `<div class="hint ok">Pays the planned bill “${esc(byId(state.planned, form.planned).name)}”.</div>` : ''}
+      ${form.planned && (byId(state.planned, form.planned) || {}).kind === 'bill' ? `<div class="hint ok">Pays the planned bill “${esc(byId(state.planned, form.planned).name)}”.</div>` : ''}
 
       <label for="f-amount">Amount${cur !== 'ZAR' ? ' (' + cur + ')' : ''}</label>
       <div class="amount-wrap"><span>${SYMBOL[cur] || cur}</span>
@@ -645,6 +645,8 @@ function renderAdd(v) {
       ${!isTransfer && !isOpening && !viaPocket && !type.held ? `<div class="lbl">Category</div>${chips('category', cats, form.category, type.person ? { none: 'None' } : {})}` : ''}
 
       ${!type.person && !type.who && !isOpening && !isTransfer ? `<div class="lbl">Person (optional)</div>${chips('person', people, form.person, { none: 'No one', add: true })}` : ''}
+
+      ${allocChoice()}
 
       <label for="f-note">Note</label>
       <input id="f-note" placeholder="What was it?" value="${esc(form.note)}" enterkeyhint="done">
@@ -712,6 +714,21 @@ function renderAdd(v) {
       parts: [{ type: form.type, amount: '', pocket, fund: form.fund, category: form.category, person: form.person }] };
     location.hash = '#split';
   };
+}
+
+// Open allocations this entry can count for (money out, and pocket/fund fit where set).
+function openAllocs() {
+  const type = typeOf(form.type);
+  if (type.dir >= 0 || isMove(form) || type.id === 'opening') return [];
+  return state.planned.filter(p => p.active && p.kind === 'alloc' && (!p.account || !form.account || p.account === form.account) && (!p.fund || p.fund === form.fund));
+}
+function allocChoice() {
+  const cur = form.planned && byId(state.planned, form.planned);
+  if (cur && cur.kind === 'bill') return '';
+  const list = openAllocs();
+  if (!list.length) return '';
+  const left = {}; planStatus().allocs.forEach(a => { left[a.p.id] = a.left; });
+  return `<div class="lbl">Allocation (optional)</div>${chips('planned', list.map(p => ({ id: p.id, name: `${p.name} · ${money(left[p.id] || 0)} left` })), form.planned, { none: 'None' })}`;
 }
 
 // A line under the fund when the money belongs to another fund than the account's own.
@@ -783,7 +800,7 @@ async function saveEntry() {
     store.setJSON('lastEntry', last);
     if (form.account && form.fund && !form.fundFrom) { const fb = store.getJSON('fundByAccount', {}); fb[form.account] = form.fund; store.setJSON('fundByAccount', fb); }
     toast(`Saved ${money(amt, cur)}`);
-    const fromPlan = !!tx.planned;
+    const fromPlan = !!tx.planned && (byId(state.planned, tx.planned) || {}).kind === 'bill';
     resetForm(type.id);
     location.hash = fromPlan ? '#plan' : '#home';
   } catch (e) {
@@ -1464,16 +1481,18 @@ function openNewPerson(fund, onDone) {
 }
 
 // ---------- Planned spending ----------
-// Bills: one payment on a set day (every month, or once on a date). Limits: a monthly amount for
-// spending in many small entries (diesel, snacks). "After planned" = balance minus what is still
-// planned until the end of this month.
+// Bills: one payment on a set day (every month, or once on a date). Allocations: money set aside for
+// one purpose and spent in several entries (3 trips to Randburg: R1,500), once until you close it,
+// or every month (diesel, snacks). Pocket and fund are optional for allocations.
+// "After planned" = balance minus bills still due this month and what is left of allocations.
 
 const PLAN_TYPES = ['expense', 'payment', 'gift'];
 function normPlan(p) {
   return Object.assign({}, p, {
-    kind: p.kind === 'limit' ? 'limit' : 'bill', type: PLAN_TYPES.includes(p.type) ? p.type : 'expense',
+    // Older "limit" rows are monthly allocations.
+    kind: p.kind === 'limit' || p.kind === 'alloc' ? 'alloc' : 'bill', type: PLAN_TYPES.includes(p.type) ? p.type : 'expense',
     repeat: p.repeat === 'once' ? 'once' : 'monthly', amount: num(p.amount), day: parseInt(p.day, 10) || 1,
-    date: toDay(p.date), active: isActive(p),
+    date: toDay(p.date), start: toDay(p.start) || toDay(p.updated_at), active: isActive(p),
   });
 }
 const pad2 = n => String(n).padStart(2, '0');
@@ -1489,12 +1508,24 @@ const spendTx = t => typeOf(t.type).dir < 0 && !isMove(t) && !pocketSettle(t);
 // note contains the bill's name.
 const billMatch = (p, t) => spendTx(t) && t.account === p.account && t.fund === p.fund && t.category === p.category &&
   (!p.person || t.person === p.person) && !!squash(p.name) && squash(t.note).includes(squash(p.name));
+// An entry that counts for an allocation without being picked for it: pocket, fund and person must
+// fit where they are set. A one-off allocation needs its name in the note (and the category, if set);
+// a monthly one counts every entry of its category, or with its name when no category is set.
+const allocMatch = (p, t) => spendTx(t) && (!p.account || t.account === p.account) && (!p.fund || t.fund === p.fund) &&
+  (!p.person || t.person === p.person) && (!p.category || t.category === p.category) &&
+  ((p.repeat === 'monthly' && !!p.category) || nameIn(p.name, t.note));
+// Every word of the name is in the note, in any order: "Randburg trips" fits "Trip to Randburg".
+function nameIn(name, note) {
+  const words = String(name || '').toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 1).map(w => w.replace(/s$/, ''));
+  const hay = String(note || '').toLowerCase();
+  return words.length > 0 && words.every(w => hay.includes(w));
+}
 
 function planStatus() {
   const today = localDay(new Date()), ym = monthOf(today), soonTo = addDays(today, 7);
   const items = state.planned.filter(p => p.active && p.amount > 0);
   const claimed = new Set();
-  const bills = [], later = [], limits = [];
+  const bills = [], later = [], allocs = [];
   // Entries linked to a bill (paid from the Planned screen) first, then entries found by name.
   const linked = id => state.txs.filter(t => t.planned === id);
   const billList = items.filter(p => p.kind === 'bill').map(p => ({ p, due: dueOn(p, ym) }))
@@ -1525,24 +1556,30 @@ function planStatus() {
     }
     bills.push(b);
   }
-  for (const p of items.filter(p => p.kind === 'limit')) {
-    const used = state.txs.filter(t => !claimed.has(t.id) && monthOf(t.date) === ym && spendTx(t) && t.fund === p.fund &&
-      t.category === p.category && (!p.account || t.account === p.account) && (!p.person || t.person === p.person));
+  const allocList = items.filter(p => p.kind === 'alloc');
+  const inPeriod = (p, t) => p.repeat === 'monthly' ? monthOf(t.date) === ym : !p.start || t.date >= p.start;
+  const usedBy = {};
+  // Entries picked for an allocation first, then entries that fit one.
+  for (const p of allocList) { usedBy[p.id] = state.txs.filter(t => t.planned === p.id && !claimed.has(t.id) && inPeriod(p, t)); usedBy[p.id].forEach(t => claimed.add(t.id)); }
+  for (const p of allocList) {
+    const more = state.txs.filter(t => !claimed.has(t.id) && !t.planned && inPeriod(p, t) && allocMatch(p, t));
+    more.forEach(t => claimed.add(t.id));
+    const used = usedBy[p.id].concat(more).sort((x, y) => y.date.localeCompare(x.date));
     const spent = round2(used.reduce((s, t) => s + txZar(t), 0));
-    limits.push({ p, spent, left: Math.max(0, round2(p.amount - spent)), n: used.length });
+    allocs.push({ p, used, spent, left: Math.max(0, round2(p.amount - spent)), late: p.repeat === 'once' && p.date && p.date < today });
   }
   const byAcc = {}, byFund = {};
   let left = 0;
-  for (const x of [...bills, ...limits]) {
+  for (const x of [...bills, ...allocs]) {
     if (!x.left) continue;
     left += x.left;
     if (x.p.account) byAcc[x.p.account] = (byAcc[x.p.account] || 0) + x.left;
-    byFund[x.p.fund] = (byFund[x.p.fund] || 0) + x.left;
+    if (x.p.fund) byFund[x.p.fund] = (byFund[x.p.fund] || 0) + x.left;
   }
-  return { ym, today, bills, later, limits, byAcc, byFund, left: round2(left), soon: bills.filter(b => b.soon) };
+  return { ym, today, bills, later, allocs, byAcc, byFund, left: round2(left), soon: bills.filter(b => b.soon) };
 }
 
-const planWhere = p => [p.account ? accName(p.account).replace(/^TymeBank /, 'Tyme ') : 'Any pocket', nameOf(L.funds(), p.fund),
+const planWhere = p => [p.account ? accName(p.account).replace(/^TymeBank /, 'Tyme ') : 'Any pocket', p.fund ? nameOf(L.funds(), p.fund) : 'any fund',
   p.person ? nameOf(L.people(), p.person) : ''].filter(Boolean).join(' · ');
 function billRow(b) {
   const p = b.p;
@@ -1593,8 +1630,10 @@ function renderPlan(v) {
   if (!state.lists) { v.innerHTML = `<header><h1>Planned</h1></header><p class="muted">${state.loading ? 'Loading…' : 'Lists not loaded yet.'}</p>`; return; }
   const plan = planStatus();
   const sugg = planSuggestions();
-  const limitRows = plan.limits.map(l => `<div class="row tap" data-plan="${esc(l.p.id)}"><span class="name">${esc(l.p.name)}
-      <div class="muted small">${money(l.spent)} used of ${money(l.p.amount)}</div><div class="muted small">${esc(planWhere(l.p))}</div></span>
+  const allocRows = plan.allocs.map(l => `<div class="row tap" data-plan="${esc(l.p.id)}"><span class="name">${esc(l.p.name)}
+      <div class="muted small">${money(l.spent)} used of ${money(l.p.amount)} · ${l.used.length} entr${l.used.length === 1 ? 'y' : 'ies'}</div>
+      <div class="muted small">${l.p.repeat === 'monthly' ? 'Every month' : l.p.date ? 'Use by ' + esc(niceDate(l.p.date)) : 'Until you close it'} · ${esc(planWhere(l.p))}</div>
+      ${l.late && l.left ? '<div class="small err">Past its date: close it to free what is left</div>' : ''}</span>
       <span class="amt ${l.spent > l.p.amount ? 'neg' : ''}">${l.spent > l.p.amount ? money(l.spent - l.p.amount) + '<div class="small">over</div>' : money(l.left) + '<div class="muted small">left</div>'}</span></div>`).join('');
   const laterRows = plan.later.map(b => `<div class="row tap" data-plan="${esc(b.p.id)}"><span class="name">${esc(b.p.name)}
       <div class="muted small">${esc(niceDate(b.due))} · ${esc(planWhere(b.p))}</div></span><span class="amt">${money(b.p.amount)}</span></div>`).join('');
@@ -1606,12 +1645,12 @@ function renderPlan(v) {
   v.innerHTML = `
     <header><h1>Planned</h1><button class="refresh" id="plan-new">+ New</button></header>
     ${state.plannedErr ? `<p class="err small">${esc(state.plannedErr)}</p>` : ''}
-    <div class="total-box"><div class="small">Still planned to the end of ${esc(monthName(plan.ym))}</div><div class="big">${money(plan.left)}</div></div>
+    <div class="total-box"><div class="small">Still planned: bills to the end of ${esc(monthName(plan.ym))}, and what is left of allocations</div><div class="big">${money(plan.left)}</div></div>
     <h2>Bills</h2><div class="card">${plan.bills.length ? plan.bills.map(billRow).join('') : '<div class="empty small">No bills yet. Tap + New, or add one from the suggestions.</div>'}</div>
-    ${limitRows ? `<h2>Limits this month</h2><div class="card">${limitRows}</div>` : ''}
+    <h2>Allocations</h2><div class="card">${allocRows || '<div class="empty small">No allocations yet. Tap + New to set money aside, like R1,500 for trips.</div>'}</div>
     ${laterRows ? `<h2>Later</h2><div class="card">${laterRows}</div>` : ''}
     ${suggRows ? `<h2>Repeats in your entries</h2><div class="card">${suggRows}</div><div class="hint">Found in the last months. Add one as a monthly bill.</div>` : ''}
-    ${off.length ? `<h2>Stopped</h2><div class="card">${off.map(p => `<div class="row tap" data-plan="${esc(p.id)}"><span class="name muted">${esc(p.name)}</span><span class="amt muted">${money(p.amount)}</span></div>`).join('')}</div>` : ''}`;
+    ${off.length ? `<h2>Stopped or closed</h2><div class="card">${off.map(p => `<div class="row tap" data-plan="${esc(p.id)}"><span class="name muted">${esc(p.name)}</span><span class="amt muted">${money(p.amount)}</span></div>`).join('')}</div>` : ''}`;
   $('plan-new').onclick = () => { planForm = newPlanForm(); location.hash = '#plan/edit'; };
   bindPlanRows(v);
   v.querySelectorAll('[data-sugg]').forEach(el => el.onclick = () => {
@@ -1627,11 +1666,23 @@ function renderPlan(v) {
 
 // ---------- New or edit a planned item ----------
 
+async function savePlan(row, btn, msg) {
+  const label = btn.textContent; btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const saved = normPlan(await api('savePlanned', row));
+    state.planned = state.planned.filter(p => p.id !== saved.id).concat([saved]); store.setJSON('cachePlanned', state.planned);
+    toast(saved.kind === 'alloc' && !saved.active ? `Closed ${saved.name}` : `Saved ${saved.name}`); planForm = null; location.hash = '#plan';
+  } catch (err) {
+    btn.disabled = false; btn.textContent = label;
+    msg.className = 'hint err'; msg.textContent = 'Not saved: ' + needsNewScript(err);
+  }
+}
+
 let planForm = null;
 function newPlanForm() {
   const acc = postable().find(a => a.id === 'tyme-ratna') ? 'tyme-ratna' : ((postable()[0] || {}).id || '');
   return { id: '', kind: 'bill', name: '', amount: '', account: acc, fund: fundFor(acc), category: '', person: '',
-    type: 'expense', repeat: 'monthly', day: '', date: '', active: true, note: '' };
+    type: 'expense', repeat: 'monthly', day: '', date: '', start: '', active: true, note: '' };
 }
 function editPlanned(id) {
   const p = byId(state.planned, id); if (!p) return;
@@ -1641,32 +1692,39 @@ function editPlanned(id) {
 function renderPlanEdit(v) {
   if (!planForm) planForm = newPlanForm();
   const P = planForm, bill = P.kind === 'bill';
+  const st = P.id && !bill ? planStatus().allocs.find(a => a.p.id === P.id) : null;
   const accs = postable().filter(a => accCurrency(a.id) === 'ZAR').map(a => ({ id: a.id, name: a.parent ? accName(a.id).replace(/^TymeBank /, 'Tyme ') : a.name }));
   const cats = L.categories().filter(isActive).filter(c => String(c.kind || 'both') !== 'income');
   v.innerHTML = `
     <header><h1>${P.id ? 'Edit planned' : 'New planned'}</h1></header>
     <form id="plan-form" autocomplete="off">
-      ${chips('kind', [{ id: 'bill', name: 'Bill' }, { id: 'limit', name: 'Limit' }], P.kind)}
-      <div class="hint">${bill ? 'One payment on a set day, like Obsidian or data.' : 'A monthly amount for many small entries, like diesel or snacks.'}</div>
+      ${chips('kind', [{ id: 'bill', name: 'Bill' }, { id: 'alloc', name: 'Allocation' }], P.kind)}
+      <div class="hint">${bill ? 'One payment on a set day, like Obsidian or data.' : 'Money set aside for one purpose and spent in several entries, like R1,500 for trips to Randburg.'}</div>
       <label for="p-name">Name</label>
-      <input id="p-name" placeholder="${bill ? 'e.g. Obsidian' : 'e.g. Diesel'}" value="${esc(P.name)}">
-      ${bill ? '<div class="hint">An entry whose note has this name ticks the bill by itself.</div>' : ''}
-      <label for="p-amount">${bill ? 'Amount' : 'Limit per month'}</label>
+      <input id="p-name" placeholder="${bill ? 'e.g. Obsidian' : 'e.g. Randburg trips'}" value="${esc(P.name)}">
+      <div class="hint">${bill ? 'An entry whose note has this name ticks the bill by itself.' : 'An entry counts when you pick this allocation on the entry form, or when its note has the words of this name.'}</div>
+      <label for="p-amount">${bill ? 'Amount' : P.repeat === 'monthly' ? 'Amount per month' : 'Amount'}</label>
       <div class="amount-wrap small-amt"><span>R</span><input id="p-amount" inputmode="decimal" placeholder="0.00" value="${esc(P.amount)}"></div>
       ${bill ? `<div class="lbl">When</div>${chips('repeat', [{ id: 'monthly', name: 'Every month' }, { id: 'once', name: 'Once' }], P.repeat)}
         ${P.repeat === 'once' ? `<label for="p-date">Date</label><input id="p-date" type="date" value="${esc(P.date)}">`
-          : `<label for="p-day">Day of the month</label><input id="p-day" inputmode="numeric" placeholder="e.g. 25" value="${esc(P.day)}">`}` : ''}
-      <div class="lbl">Paid from</div>${chips('account', accs, P.account, bill ? {} : { none: 'Any pocket' })}
-      <div class="lbl">Fund (whose money)</div>${chips('fund', L.funds().filter(isActive), P.fund)}
-      <div class="lbl">Category</div>${chips('category', cats, P.category)}
+          : `<label for="p-day">Day of the month</label><input id="p-day" inputmode="numeric" placeholder="e.g. 25" value="${esc(P.day)}">`}`
+        : `<div class="lbl">How long</div>${chips('repeat', [{ id: 'once', name: 'Until used or closed' }, { id: 'monthly', name: 'Every month' }], P.repeat)}
+        ${P.repeat === 'once' ? `<label for="p-date">Use by (optional)</label><input id="p-date" type="date" value="${esc(P.date)}">` : '<div class="hint">Starts again each month. With a category, every entry of that category counts.</div>'}`}
+      <div class="lbl">Paid from${bill ? '' : ' (optional)'}</div>${chips('account', accs, P.account, bill ? {} : { none: 'Any pocket' })}
+      <div class="lbl">Fund (whose money)${bill ? '' : ' (optional)'}</div>${chips('fund', L.funds().filter(isActive), P.fund, bill ? {} : { none: 'Any fund' })}
+      ${bill ? '' : '<div class="hint">With a pocket or fund, its "after planned" on the home screen goes down. Without, only the total does.</div>'}
+      <div class="lbl">Category${bill ? '' : ' (optional)'}</div>${chips('category', cats, P.category, bill ? {} : { none: 'Any' })}
       ${bill ? `<div class="lbl">Pay as</div>${chips('type', PLAN_TYPES.map(typeOf), P.type)}` : ''}
       <div class="lbl">Person (optional)</div>${chips('person', L.people().filter(isActive), P.person, { none: 'No one' })}
-      ${P.id ? `<div class="hint"><label style="display:flex;gap:8px;align-items:center;margin:0;color:inherit"><input type="checkbox" id="p-active" style="width:auto" ${P.active ? 'checked' : ''}> Still planned (untick when it stops)</label></div>` : ''}
+      ${P.id && bill ? `<div class="hint"><label style="display:flex;gap:8px;align-items:center;margin:0;color:inherit"><input type="checkbox" id="p-active" style="width:auto" ${P.active ? 'checked' : ''}> Still planned (untick when it stops)</label></div>` : ''}
       <button class="primary" id="p-save" type="submit">Save</button>
+      ${P.id && !bill ? `<button type="button" class="ghost" id="p-close">${P.active ? `Close${st && st.left ? ' and free ' + money(st.left) : ''}` : 'Open again'}</button>` : ''}
       ${P.id ? '<button type="button" class="ghost danger" id="p-del">Delete</button>' : ''}
       <button type="button" class="ghost" id="p-cancel">Cancel</button>
       <p id="p-msg" class="hint"></p>
-    </form>`;
+    </form>
+    ${st && st.used.length ? `<h2>Counted entries</h2><div class="card">${st.used.map(txRow).join('')}</div>` : ''}`;
+  bindTxRows(v);
   const sync = () => {
     P.name = $('p-name').value; P.amount = $('p-amount').value;
     if ($('p-day')) P.day = $('p-day').value;
@@ -1679,8 +1737,9 @@ function renderPlanEdit(v) {
     const name = group.dataset.name, val = btn.dataset.v;
     if (name === 'person') P.person = P.person === val ? '' : val;
     else P[name] = val;
-    if (name === 'account' && val) P.fund = fundFor(val);
-    if (name === 'kind' && val === 'bill' && !P.account) P.account = newPlanForm().account;
+    if (name === 'account' && val && (bill || P.fund)) P.fund = fundFor(val);
+    if (name === 'kind' && val === 'bill') { if (!P.account) P.account = newPlanForm().account; if (!P.fund) P.fund = fundFor(P.account); P.repeat = 'monthly'; }
+    if (name === 'kind' && val === 'alloc') { P.repeat = 'once'; P.account = ''; P.fund = ''; }
     renderPlanEdit(v);
   });
   $('p-cancel').onclick = () => { location.hash = '#plan'; };
@@ -1690,21 +1749,17 @@ function renderPlanEdit(v) {
     const problem = !P.name.trim() ? 'Enter a name.' : !(num(P.amount) > 0) ? 'Enter an amount.'
       : bill && P.repeat === 'monthly' && !(day >= 1 && day <= 31) ? 'Enter a day from 1 to 31.'
       : bill && P.repeat === 'once' && !P.date ? 'Pick a date.'
-      : bill && !P.account ? 'Pick where it is paid from.' : !P.fund ? 'Pick a fund.' : !P.category ? 'Pick a category.' : '';
+      : bill && !P.account ? 'Pick where it is paid from.' : bill && !P.fund ? 'Pick a fund.' : bill && !P.category ? 'Pick a category.' : '';
     if (problem) { msg.className = 'hint err'; msg.textContent = problem; return; }
     const row = { id: P.id || '', name: P.name.trim(), kind: P.kind, type: bill ? P.type : '', amount: num(P.amount),
-      account: P.account || '', fund: P.fund, category: P.category, person: P.person || '',
-      repeat: bill ? P.repeat : 'monthly', day: bill && P.repeat === 'monthly' ? day : '', date: bill && P.repeat === 'once' ? P.date : '',
-      active: P.active !== false, note: P.note || '' };
-    const btn = $('p-save'); btn.disabled = true; btn.textContent = 'Saving…';
-    try {
-      const saved = normPlan(await api('savePlanned', row));
-      state.planned = state.planned.filter(p => p.id !== saved.id).concat([saved]); store.setJSON('cachePlanned', state.planned);
-      toast(`Saved ${saved.name}`); planForm = null; location.hash = '#plan';
-    } catch (err) {
-      btn.disabled = false; btn.textContent = 'Save';
-      msg.className = 'hint err'; msg.textContent = 'Not saved: ' + needsNewScript(err);
-    }
+      account: P.account || '', fund: P.fund || '', category: P.category || '', person: P.person || '',
+      repeat: P.repeat, day: bill && P.repeat === 'monthly' ? day : '', date: P.repeat === 'once' ? (P.date || '') : '',
+      start: P.start || localDay(new Date()), active: P.active !== false, note: P.note || '' };
+    await savePlan(row, $('p-save'), msg);
+  };
+  if ($('p-close')) $('p-close').onclick = () => {
+    sync(); P.active = !P.active;
+    savePlan(Object.assign({}, P, { amount: num(P.amount), day: P.day ? parseInt(P.day, 10) : '' }), $('p-close'), $('p-msg'));
   };
   if ($('p-del')) $('p-del').onclick = async () => {
     if (!confirm(`Delete “${P.name}”? To keep its history, untick "Still planned" instead.`)) return;

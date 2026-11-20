@@ -66,10 +66,10 @@ const TABS = {
               'fee', 'note', 'receipt_url', 'created_at', 'source', 'group_id', 'paid_to', 'planned'],
     rows: [],
   },
-  // Planned spending: monthly bills and limits, and one-off bills.
+  // Planned spending: bills (monthly or once) and allocations (money set aside, once or monthly).
   Planned: {
     headers: ['id', 'name', 'kind', 'type', 'amount', 'account', 'fund', 'category', 'person',
-              'repeat', 'day', 'date', 'active', 'note', 'updated_at'],
+              'repeat', 'day', 'date', 'start', 'active', 'note', 'updated_at'],
     rows: [],
   },
   // Unfinished split payments. "data" holds the app's form as text.
