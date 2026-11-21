@@ -7,6 +7,21 @@ Phone-first home-screen web app for personal and fund accounting.
 
 No financial data is stored in this repository. The app keeps the Apps Script link and secret key only on the device.
 
+## Receipts (version 0.9)
+
+**Scan receipt** (home screen, and on the Add form for money out): pick a scanned PDF (Files app > Scan Documents,
+or Notes > Share > Save to Files) or take a photo. The Apps Script saves it in the **Receipts** folder next to the
+data sheet and reads shop, date, total and item lines with OpenAI. If an entry with the same amount (within 3 days)
+has no receipt yet, the app offers to attach it there; otherwise the payment screen opens filled in. Tap an item's
+part number to move it to another part; part amounts follow the items. On save the file is renamed
+(`2026-11-20 R1486.50 Build It Soweto.pdf`), `receipt_url` is set on every part, and the items go to the
+**Receipt items** tab. Entries also get **Open receipt** and **Attach receipt**.
+
+**After merging, set it up once:**
+1. Apps Script > Project Settings > Script Properties > add `OPENAI_API_KEY` (your OpenAI key). Optional: `OPENAI_MODEL` (default `gpt-5-mini`).
+2. Paste the new `apps-script/Code.gs`, Save, then run `checkReceipts` once from the editor and allow Drive and external access. The log shows the folder link and "OpenAI key works."
+3. Deploy > Manage deployments > edit > Version: New version > Deploy. The link stays the same.
+
 ## Funds that owe each other (version 0.6)
 
 Each account belongs to one fund (Dada Ratna pocket and Cash ZAR: Personal; Dada Guna pocket: Dada Guna;

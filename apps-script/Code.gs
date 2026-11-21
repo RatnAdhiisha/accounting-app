@@ -77,6 +77,11 @@ const TABS = {
     headers: ['id', 'updated_at', 'data'],
     rows: [],
   },
+  // Item lines read from scanned receipts (for reports and later stock tracking).
+  'Receipt items': {
+    headers: ['receipt_id', 'receipt_url', 'date', 'shop', 'item', 'qty', 'amount', 'part', 'entry_id', 'group_id', 'created_at'],
+    rows: [],
+  },
 };
 
 /** Run once from the editor. Safe to run again: it only fills tabs that are empty. */
@@ -184,6 +189,8 @@ function doPost(e) {
   try {
     const req = JSON.parse(e.postData.contents);
     checkKey_(req.key);
+    // Reading a receipt takes a few seconds and writes no rows, so it runs without the lock.
+    if (req.action === 'scanReceipt') return json_({ ok: true, data: scanReceipt_(req.data) });
     lock.waitLock(10000);
     switch (req.action) {
       case 'addTransaction': {
@@ -254,6 +261,32 @@ function doPost(e) {
         deleteRowsWhere_(sheet_('Planned'), r => r.id === req.data.id);
         return json_({ ok: true, data: { id: req.data.id } });
       }
+      // Links a scanned receipt to entries: sets receipt_url on those rows, renames the Drive file
+      // ("2026-11-20 R1486.50 Build It.pdf") and saves the item lines in the Receipt items tab.
+      case 'attachReceipt': {
+        const d = req.data;
+        if (!d.url) throw new Error('No receipt given');
+        const sh = sheet_('Transactions');
+        const headers = headers_(sh, TABS.Transactions.headers);
+        const idCol = headers.indexOf('id'), urlCol = headers.indexOf('receipt_url');
+        const ids = new Set(d.ids || []);
+        const data = sh.getDataRange().getValues();
+        let n = 0;
+        for (let i = 1; i < data.length; i++) {
+          if (ids.has(data[i][idCol])) { sh.getRange(i + 1, urlCol + 1).setValue(d.url); n++; }
+        }
+        if (d.file_id && d.name) { try { DriveApp.getFileById(d.file_id).setName(d.name); } catch (err) {} }
+        if (d.file_id && d.items && d.items.length) {
+          const ish = sheet_('Receipt items');
+          const ih = headers_(ish, TABS['Receipt items'].headers);
+          deleteRowsWhere_(ish, r => r.receipt_id === d.file_id);
+          const now = new Date().toISOString();
+          appendRows_(ish, ih, d.items.map(it => ({ receipt_id: d.file_id, receipt_url: d.url, date: d.date || '',
+            shop: d.shop || '', item: it.name || '', qty: it.qty || '', amount: it.amount || 0, part: it.part || '',
+            entry_id: (d.ids || [])[0] || '', group_id: d.group_id || '', created_at: now })));
+        }
+        return json_({ ok: true, data: { updated: n } });
+      }
       // A new person from the app. The id is made from the name and never changes;
       // the name can be edited in the sheet later.
       case 'addPerson': {
@@ -279,4 +312,89 @@ function doPost(e) {
   } finally {
     try { lock.releaseLock(); } catch (e) {}
   }
+}
+
+// ---------- Receipts ----------
+// The app sends a scanned PDF or a photo. It is saved in the "Receipts" folder (next to this sheet)
+// and read by OpenAI. Needs the script property OPENAI_API_KEY (Project Settings > Script Properties).
+// OPENAI_MODEL can be set there too, to change the model without changing this code.
+
+function receiptsFolder_() {
+  const props = PropertiesService.getScriptProperties();
+  const id = props.getProperty('RECEIPTS_FOLDER_ID');
+  if (id) { try { return DriveApp.getFolderById(id); } catch (e) {} }
+  const parents = DriveApp.getFileById(SpreadsheetApp.getActiveSpreadsheet().getId()).getParents();
+  const parent = parents.hasNext() ? parents.next() : DriveApp.getRootFolder();
+  const found = parent.getFoldersByName('Receipts');
+  const folder = found.hasNext() ? found.next() : parent.createFolder('Receipts');
+  props.setProperty('RECEIPTS_FOLDER_ID', folder.getId());
+  return folder;
+}
+
+function scanReceipt_(d) {
+  if (!d || !d.b64) throw new Error('No file received');
+  const mime = d.mime || 'application/pdf';
+  const ext = mime === 'application/pdf' ? 'pdf' : mime === 'image/png' ? 'png' : 'jpg';
+  const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HHmmss');
+  const blob = Utilities.newBlob(Utilities.base64Decode(d.b64), mime, 'Scan ' + stamp + '.' + ext);
+  const file = receiptsFolder_().createFile(blob);
+  const out = { file_id: file.getId(), url: file.getUrl(), name: file.getName(), ext };
+  try { Object.assign(out, readReceipt_(d.b64, mime, file.getName())); }
+  catch (err) { out.read_error = err.message; }
+  return out;
+}
+
+const RECEIPT_PROMPT = 'This is a shop receipt or invoice, usually from South Africa. Read it and return: ' +
+  'shop: the store name, short, with the branch if printed (e.g. "Build It Soweto"); ' +
+  'date: the purchase date as YYYY-MM-DD (printed dates are usually day/month/year), or "" if none; ' +
+  'total: the final amount paid including VAT, after discounts (not the cash tendered or change); ' +
+  'currency: ISO code, usually ZAR; ' +
+  'items: every product line, in order, with a short readable name, the quantity (1 if not printed) and the line amount as printed. ' +
+  'Discount lines are items with a negative amount. Leave out subtotal, VAT, tendered and change lines. ' +
+  'If something cannot be read, use "" or 0.';
+
+const RECEIPT_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['shop', 'date', 'total', 'currency', 'items'],
+  properties: {
+    shop: { type: 'string' }, date: { type: 'string' }, total: { type: 'number' }, currency: { type: 'string' },
+    items: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['name', 'qty', 'amount'],
+      properties: { name: { type: 'string' }, qty: { type: 'number' }, amount: { type: 'number' } } } },
+  },
+};
+
+function readReceipt_(b64, mime, filename) {
+  const props = PropertiesService.getScriptProperties();
+  const key = props.getProperty('OPENAI_API_KEY');
+  if (!key) throw new Error('No OpenAI key yet. Add OPENAI_API_KEY in the Apps Script settings.');
+  const model = props.getProperty('OPENAI_MODEL') || 'gpt-5-mini';
+  const file = mime === 'application/pdf'
+    ? { type: 'input_file', filename, file_data: 'data:application/pdf;base64,' + b64 }
+    : { type: 'input_image', image_url: 'data:' + mime + ';base64,' + b64 };
+  const body = {
+    model,
+    input: [{ role: 'user', content: [file, { type: 'input_text', text: RECEIPT_PROMPT }] }],
+    text: { format: { type: 'json_schema', name: 'receipt', strict: true, schema: RECEIPT_SCHEMA } },
+  };
+  if (/^(gpt-5|o\d)/.test(model)) body.reasoning = { effort: 'low' };
+  const res = UrlFetchApp.fetch('https://api.openai.com/v1/responses', {
+    method: 'post', contentType: 'application/json', headers: { Authorization: 'Bearer ' + key },
+    payload: JSON.stringify(body), muteHttpExceptions: true });
+  let j = {};
+  try { j = JSON.parse(res.getContentText()); } catch (e) {}
+  if (res.getResponseCode() !== 200) throw new Error('OpenAI: ' + ((j.error && j.error.message) || 'error ' + res.getResponseCode()));
+  let text = j.output_text || '';
+  if (!text) (j.output || []).forEach(o => (o.content || []).forEach(c => { if (c.type === 'output_text') text += c.text; }));
+  if (!text) throw new Error('OpenAI gave no answer');
+  const r = JSON.parse(text);
+  return { shop: r.shop || '', date: /^\d{4}-\d{2}-\d{2}$/.test(r.date) ? r.date : '', total: Number(r.total) || 0,
+    currency: r.currency || 'ZAR', items: (r.items || []).map(it => ({ name: it.name || '', qty: Number(it.qty) || 1, amount: Number(it.amount) || 0 })) };
+}
+
+/** Run once from the editor after pasting: it asks for Drive access and checks the OpenAI key. */
+function checkReceipts() {
+  console.log('Receipts folder: ' + receiptsFolder_().getUrl());
+  const key = PropertiesService.getScriptProperties().getProperty('OPENAI_API_KEY');
+  if (!key) { console.log('No OPENAI_API_KEY yet: Project Settings > Script Properties > Add script property.'); return; }
+  const res = UrlFetchApp.fetch('https://api.openai.com/v1/models', { headers: { Authorization: 'Bearer ' + key }, muteHttpExceptions: true });
+  console.log(res.getResponseCode() === 200 ? 'OpenAI key works.' : 'OpenAI key problem: ' + res.getContentText().slice(0, 300));
 }
