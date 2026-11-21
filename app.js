@@ -1737,6 +1737,8 @@ function normPlan(p) {
     kind: p.kind === 'limit' || p.kind === 'alloc' ? 'alloc' : 'bill', type: PLAN_TYPES.includes(p.type) ? p.type : 'expense',
     repeat: p.repeat === 'once' ? 'once' : 'monthly', amount: num(p.amount), day: parseInt(p.day, 10) || 1,
     date: toDay(p.date), start: toDay(p.start) || toDay(p.updated_at), active: isActive(p),
+    // Months skipped on purpose ("2026-11,2026-12"): not paid and not due.
+    skip: Array.isArray(p.skip) ? p.skip : String(p.skip || '').split(',').map(x => x.trim()).filter(Boolean),
   });
 }
 const pad2 = n => String(n).padStart(2, '0');
@@ -1790,11 +1792,12 @@ function planStatus() {
     if (p.repeat === 'once' && b.due && monthOf(b.due) > ym) { later.push(b); continue; }
     // A one-off bill paid in an earlier month is done: not shown any more.
     if (p.repeat === 'once' && b.paid && monthOf(b.paid.date) < ym) continue;
-    b.left = b.paid ? 0 : p.amount;
-    b.overdue = !b.paid && b.due < today;
-    b.soon = !b.paid && b.due <= soonTo;
+    b.skipped = !b.paid && p.repeat === 'monthly' && p.skip.includes(ym);
+    b.left = b.paid || b.skipped ? 0 : p.amount;
+    b.overdue = !b.paid && !b.skipped && b.due < today;
+    b.soon = !b.paid && !b.skipped && b.due <= soonTo;
     // Stopped or failed subscriptions: not paid 5 days after the day.
-    if (!b.paid && b.due <= addDays(today, -5)) {
+    if (!b.paid && !b.skipped && b.due <= addDays(today, -5)) {
       const prev = state.txs.filter(t => t.planned === p.id || billMatch(p, t)).sort((x, y) => y.date.localeCompare(x.date))[0];
       b.flag = prev ? `Not paid yet · last paid ${niceDate(prev.date)}` : 'Not paid yet';
     }
@@ -1828,15 +1831,33 @@ const planWhere = p => [p.account ? accName(p.account).replace(/^TymeBank /, 'Ty
   p.person ? nameOf(L.people(), p.person) : ''].filter(Boolean).join(' · ');
 function billRow(b) {
   const p = b.p;
-  const when = b.paid ? `Paid ${niceDate(b.paid.date)} ✓` : b.overdue ? `Due ${niceDate(b.due)}, overdue` : `Due ${niceDate(b.due)}`;
+  const when = b.paid ? `Paid ${niceDate(b.paid.date)} ✓` : b.skipped ? `Skipped this month` : b.overdue ? `Due ${niceDate(b.due)}, overdue` : `Due ${niceDate(b.due)}`;
   return `<div class="row tap" data-plan="${esc(p.id)}"><span class="name">${esc(p.name)}
       <div class="muted small ${b.overdue ? 'err' : ''}">${esc(when)}</div>
       <div class="muted small">${esc(planWhere(p))}</div>${b.flag ? `<div class="small err">${esc(b.flag)}</div>` : ''}</span>
-    <span class="amt">${money(b.paid ? txZar(b.paid) : p.amount)}${b.paid ? '' : `<div><button type="button" class="link" data-planpay="${esc(p.id)}">Pay ›</button></div>`}</span></div>`;
+    <span class="amt ${b.skipped ? 'muted' : ''}">${money(b.paid ? txZar(b.paid) : p.amount)}${b.paid ? ''
+      : b.skipped ? `<div><button type="button" class="link" data-planskip="${esc(p.id)}">Undo skip</button></div>`
+      : `<div><button type="button" class="link" data-planpay="${esc(p.id)}">Pay ›</button></div>${p.repeat === 'monthly' ? `<div><button type="button" class="link" style="color:var(--muted)" data-planskip="${esc(p.id)}">Skip</button></div>` : ''}`}</span></div>`;
 }
 function bindPlanRows(v) {
   v.querySelectorAll('[data-planpay]').forEach(el => el.onclick = e => { e.stopPropagation(); payPlanned(el.dataset.planpay); });
+  v.querySelectorAll('[data-planskip]').forEach(el => el.onclick = e => { e.stopPropagation(); skipPlanned(el.dataset.planskip, el); });
   v.querySelectorAll('[data-plan]').forEach(el => el.onclick = () => editPlanned(el.dataset.plan));
+}
+// Skip this month's bill (you didn't use the service), or undo the skip.
+async function skipPlanned(id, btn) {
+  const p = byId(state.planned, id); if (!p) return;
+  const ym = monthOf(localDay(new Date()));
+  const skip = p.skip.includes(ym) ? p.skip.filter(m => m !== ym) : p.skip.concat([ym]);
+  btn.disabled = true;
+  try {
+    const res = await api('savePlanned', Object.assign({}, p, { skip: skip.join(',') }));
+    if (res.columns && !res.columns.includes('skip') || !res.columns) throw new Error('Skip needs the updated Apps Script (Code.gs, 21 Nov 2026).');
+    const saved = normPlan(res);
+    state.planned = state.planned.map(x => x.id === id ? saved : x); store.setJSON('cachePlanned', state.planned);
+    toast(skip.includes(ym) ? `Skipped ${p.name} this month` : `${p.name} is due again`);
+    render();
+  } catch (e) { btn.disabled = false; toast(needsNewScript(e), true); }
 }
 // Opens the Add form filled in from the bill; saving it ticks the bill.
 function payPlanned(id) {
@@ -1912,6 +1933,7 @@ function renderPlan(v) {
 // ---------- New or edit a planned item ----------
 
 async function savePlan(row, btn, msg) {
+  if (Array.isArray(row.skip)) row = Object.assign({}, row, { skip: row.skip.join(',') });
   const label = btn.textContent; btn.disabled = true; btn.textContent = 'Saving…';
   try {
     const saved = normPlan(await api('savePlanned', row));
@@ -1999,7 +2021,7 @@ function renderPlanEdit(v) {
     const row = { id: P.id || '', name: P.name.trim(), kind: P.kind, type: bill ? P.type : '', amount: num(P.amount),
       account: P.account || '', fund: P.fund || '', category: P.category || '', person: P.person || '',
       repeat: P.repeat, day: bill && P.repeat === 'monthly' ? day : '', date: P.repeat === 'once' ? (P.date || '') : '',
-      start: P.start || localDay(new Date()), active: P.active !== false, note: P.note || '' };
+      start: P.start || localDay(new Date()), active: P.active !== false, note: P.note || '', skip: P.skip || [] };
     await savePlan(row, $('p-save'), msg);
   };
   if ($('p-close')) $('p-close').onclick = () => {

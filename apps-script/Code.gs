@@ -69,7 +69,7 @@ const TABS = {
   // Planned spending: bills (monthly or once) and allocations (money set aside, once or monthly).
   Planned: {
     headers: ['id', 'name', 'kind', 'type', 'amount', 'account', 'fund', 'category', 'person',
-              'repeat', 'day', 'date', 'start', 'active', 'note', 'updated_at'],
+              'repeat', 'day', 'date', 'start', 'active', 'note', 'updated_at', 'skip'],
     rows: [],
   },
   // Unfinished split payments. "data" holds the app's form as text.
@@ -255,7 +255,7 @@ function doPost(e) {
         const row = Object.assign({}, req.data, { id, updated_at: new Date().toISOString() });
         deleteRowsWhere_(sh, r => r.id === id);
         appendRows_(sh, headers, [row]);
-        return json_({ ok: true, data: row });
+        return json_({ ok: true, data: Object.assign({ columns: headers }, row) });
       }
       case 'deletePlanned': {
         deleteRowsWhere_(sheet_('Planned'), r => r.id === req.data.id);
