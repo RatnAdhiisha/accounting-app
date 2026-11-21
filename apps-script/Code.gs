@@ -244,6 +244,10 @@ function doPost(e) {
         return json_({ ok: true, data: row });
       }
       case 'deleteDraft': {
+        // A deleted draft's receipt goes to the Drive bin (it can be restored there for 30 days).
+        readTab_('Drafts').filter(r => r.id === req.data.id).forEach(r => {
+          try { const x = JSON.parse(r.data); if (x.receipt && x.receipt.file_id) DriveApp.getFileById(x.receipt.file_id).setTrashed(true); } catch (err) {}
+        });
         deleteRowsWhere_(sheet_('Drafts'), r => r.id === req.data.id);
         return json_({ ok: true, data: { id: req.data.id } });
       }
@@ -265,6 +269,11 @@ function doPost(e) {
       // ("2026-11-20 R1486.50 Build It.pdf") and saves the item lines in the Receipt items tab.
       case 'attachReceipt': {
         const d = req.data;
+        // A receipt not saved yet comes with its file; it is saved now, already with its final name.
+        if (d.b64) {
+          const file = saveReceiptFile_(d.b64, d.mime, d.name);
+          d.file_id = file.getId(); d.url = file.getUrl(); d.name = '';
+        }
         if (!d.url) throw new Error('No receipt given');
         const sh = sheet_('Transactions');
         const headers = headers_(sh, TABS.Transactions.headers);
@@ -285,7 +294,7 @@ function doPost(e) {
             shop: d.shop || '', item: it.name || '', qty: it.qty || '', amount: it.amount || 0, part: it.part || '',
             entry_id: (d.ids || [])[0] || '', group_id: d.group_id || '', created_at: now })));
         }
-        return json_({ ok: true, data: { updated: n } });
+        return json_({ ok: true, data: { updated: n, url: d.url, file_id: d.file_id || '' } });
       }
       // A new person from the app. The id is made from the name and never changes;
       // the name can be edited in the sheet later.
@@ -331,15 +340,28 @@ function receiptsFolder_() {
   return folder;
 }
 
+const receiptExt_ = mime => mime === 'application/pdf' ? 'pdf' : mime === 'image/png' ? 'png' : 'jpg';
+
+// Saves the file in the Receipts folder. The app calls this only when an entry (or draft) is saved,
+// so receipts that were scanned but not used never reach Drive.
+function saveReceiptFile_(b64, mime, name) {
+  mime = mime || 'application/pdf';
+  const ext = receiptExt_(mime);
+  const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HHmmss');
+  const base = String(name || 'Receipt ' + stamp).replace(/\.(pdf|jpe?g|png)$/i, '');
+  return receiptsFolder_().createFile(Utilities.newBlob(Utilities.base64Decode(b64), mime, base + '.' + ext));
+}
+
+// Reads the receipt. With save: false (the app from 0.9.3) nothing is stored in Drive yet.
 function scanReceipt_(d) {
   if (!d || !d.b64) throw new Error('No file received');
   const mime = d.mime || 'application/pdf';
-  const ext = mime === 'application/pdf' ? 'pdf' : mime === 'image/png' ? 'png' : 'jpg';
-  const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HHmmss');
-  const blob = Utilities.newBlob(Utilities.base64Decode(d.b64), mime, 'Scan ' + stamp + '.' + ext);
-  const file = receiptsFolder_().createFile(blob);
-  const out = { file_id: file.getId(), url: file.getUrl(), name: file.getName(), ext };
-  try { Object.assign(out, readReceipt_(d.b64, mime, file.getName())); }
+  const out = { ext: receiptExt_(mime) };
+  if (d.save !== false) {
+    const file = saveReceiptFile_(d.b64, mime, 'Scan ' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HHmmss'));
+    Object.assign(out, { file_id: file.getId(), url: file.getUrl(), name: file.getName() });
+  }
+  try { Object.assign(out, readReceipt_(d.b64, mime, 'receipt.' + out.ext)); }
   catch (err) { out.read_error = err.message; }
   return out;
 }

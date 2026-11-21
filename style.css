@@ -133,3 +133,5 @@ a.btn-link { display:block; box-sizing:border-box; text-align:center; text-decor
 .rmatch button.ghost { margin-top:8px; }
 .spin { display:inline-block; width:14px; height:14px; margin-right:8px; vertical-align:-2px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
+.rmatch.warn { background:#fff4e0; color:#5a3d00; }
+@media (prefers-color-scheme: dark) { .rmatch.warn { background:#3a2c10; color:#f3dfb5; } }
