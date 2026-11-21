@@ -1,7 +1,7 @@
 // Accounting app: quick entry, split payments, balances home screen, entry list, new people, planned spending, receipts.
 'use strict';
 
-const VERSION = '0.9.3';
+const VERSION = '0.9.4';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -1471,7 +1471,7 @@ async function scanReceipt() {
   const file = await pickFile();
   if (!file) return null;
   if (tooBig(file)) { toast('This PDF is too big (over 15 MB).', true); return null; }
-  const wait = openSheet('<h3>Reading the receipt…</h3><p class="muted">Saving it to Drive and reading it. This takes about 10 seconds.</p>');
+  const wait = openSheet('<h3>Reading the receipt…</h3><p class="muted">The receipt is being read. This takes about 10 seconds.</p>');
   try { return await uploadReceipt(file); }
   catch (e) { toast('Receipt not read: ' + needsNewScript(e), true); return null; }
   finally { wait.close(); }
@@ -1616,7 +1616,7 @@ function receiptBox() {
   const r = split.receipt;
   if (!r) return '';
   if (r.pending) return `<div class="card pad receipt reading"><div class="t1"><span class="spin"></span>Reading the receipt…</div>
-    <div class="t2">Saving it to Drive and reading it. Meanwhile, pick the pocket, fund and category below.</div></div>`;
+    <div class="t2">The AI is reading it (it goes to Drive only when you save). Meanwhile, pick the pocket, fund and category below.</div></div>`;
   if (r.failed) return `<div class="card pad receipt"><div class="t1">Receipt not saved</div>
     <div class="hint err">${esc(r.read_error)}</div>${receiptFiles.has(r) ? '<button type="button" class="ghost" id="rc-retry">Try again</button>' : ''}</div>`;
   const head = `<div class="t1">Receipt${r.shop ? ': ' + esc(r.shop) : ''}</div>
