@@ -1,7 +1,7 @@
-// Accounting app: quick entry, split payments, balances home screen, entry list, new people, planned spending.
+// Accounting app: quick entry, split payments, balances home screen, entry list, new people, planned spending, receipts.
 'use strict';
 
-const VERSION = '0.8.2';
+const VERSION = '0.9.0';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -422,6 +422,7 @@ function renderHome(v) {
   v.innerHTML = `
     <header><h1>Accounting</h1><button class="refresh" id="refresh">↻ Refresh</button></header>
     <div>${statusLine()}</div>
+    <button type="button" class="ghost" id="scan-receipt">Scan receipt</button>
     <div class="total-box">
       <div class="small">All money${missingRate ? ' (foreign cash without a rate left out)' : ''}</div>
       <div class="big">${money(totalZar)}</div>
@@ -442,6 +443,7 @@ function renderHome(v) {
     ${recent.length ? '<p><a class="link" href="#list">All entries ›</a></p>' : ''}
   `;
   $('refresh').onclick = refresh;
+  $('scan-receipt').onclick = startReceipt;
   bindTxRows(v);
   bindPlanRows(v);
   v.querySelectorAll('[data-settle]').forEach(el => el.onclick = () => {
@@ -660,6 +662,7 @@ function renderAdd(v) {
 
       <button class="primary" id="save" type="submit">Save</button>
       ${SPLIT_TYPES.has(type.id) && !isOpening && !viaPocket && (!form.account || accCurrency(form.account) === 'ZAR') ? '<button type="button" class="ghost" id="to-split">Split into parts…</button>' : ''}
+      ${type.dir < 0 && !isOpening ? '<button type="button" class="ghost" id="scan-receipt">Scan receipt…</button>' : ''}
       <p id="form-msg" class="hint"></p>
     </form>`;
 
@@ -707,6 +710,7 @@ function renderAdd(v) {
   if ($('f-movefund')) $('f-movefund').onchange = e => { sync(); form.moveFund = e.target.checked; form.to_fund = ''; renderAdd(v); };
   if ($('sms-fee')) $('sms-fee').onclick = () => { $('f-fee').value = (num($('f-fee').value) + 0.5).toFixed(2); };
   f.onsubmit = async e => { e.preventDefault(); sync(); await saveEntry(); };
+  if ($('scan-receipt')) $('scan-receipt').onclick = startReceipt;
   if ($('to-split')) $('to-split').onclick = () => {
     sync();
     const pocket = form.account && postable().some(a => a.id === form.account) ? form.account : '';
@@ -877,7 +881,7 @@ function startSplit(args) {
     const account = seed.account || (last.account && topOf(last.account)) || (accs[0] && accs[0].id) || '';
     Object.assign(split, { mode: seed.mode || 'out', total: seed.total || '', date: seed.date || localDay(new Date()),
       account: accs.some(a => a.id === account) ? account : ((accs[0] && accs[0].id) || ''),
-      paid_to: '', note: seed.note || '', fee: seed.fee || '', fee_part: 0, parts: [] });
+      paid_to: '', note: seed.note || '', fee: seed.fee || '', fee_part: 0, parts: [], receipt: seed.receipt || null });
     split.parts = seed.parts && seed.parts.length
       ? seed.parts.map(p => Object.assign(newPart(), p, { pocket: p.pocket || newPart().pocket }))
       : [newPart()];
@@ -906,6 +910,7 @@ function fromRows(rows) {
     date: rows[0].date, account: topOf(rowAcc(cash[0])), paid_to: rows[0].paid_to || '', note: common,
     fee: feeIdx >= 0 ? String(num(cash[feeIdx].fee)) : '', fee_part: Math.max(feeIdx, 0),
     parts, editGroup: rows[0].group_id || '', editIds: rows.map(t => t.id), open: null,
+    receipt: (rows.find(t => t.receipt_url) || {}).receipt_url ? { url: rows.find(t => t.receipt_url).receipt_url, items: [] } : null,
   };
 }
 
@@ -985,6 +990,7 @@ function renderSplit(v, args) {
   v.innerHTML = `
     <header><h1>${split.editGroup || split.editIds ? 'Edit payment' : 'Split payment'}</h1></header>
     <form id="split-form" autocomplete="off">
+      ${receiptBox()}
       ${chips('mode', [{ id: 'out', label: 'Money out' }, { id: 'in', label: 'Money in' }], split.mode)}
       <label for="s-total">Total ${out ? 'paid' : 'received'}</label>
       <div class="amount-wrap"><span>R</span><input id="s-total" inputmode="decimal" enterkeyhint="done" placeholder="0.00" value="${esc(split.total)}"></div>
@@ -1039,10 +1045,13 @@ function renderSplit(v, args) {
     if (e.target.closest('[data-remove]')) return;
     sync(); split.open = Number(el.dataset.open); redraw();
   });
+  v.querySelectorAll('[data-item]').forEach(el => el.onclick = () => { sync(); moveReceiptItem(Number(el.dataset.item)); split.open = null; redraw(); });
   v.querySelectorAll('[data-remove]').forEach(el => el.onclick = e => {
     e.stopPropagation(); sync();
     const i = Number(el.dataset.remove);
     split.parts.splice(i, 1);
+    // Items of a removed part go back to part 1.
+    if (split.receipt && split.receipt.items) { split.receipt.items.forEach(it => { if (it.part === i) it.part = 0; else if (it.part > i) it.part--; }); applyReceiptItems(); }
     if (split.fee_part >= split.parts.length) split.fee_part = 0;
     split.open = null; redraw();
   });
@@ -1140,7 +1149,7 @@ function splitRows() {
     const amt = round2(num(p.amount));
     const base = { date: split.date, currency: 'ZAR', rate: '', fund: p.fund, to_account: '', to_fund: '',
       category: typeOf(p.type).person && !p.category ? '' : p.category, person: p.person || '',
-      paid_to: split.paid_to || '', source: 'app' };
+      paid_to: split.paid_to || '', receipt_url: split.receipt ? split.receipt.url : '', source: 'app' };
     const own = p.type === 'transfer';
     rows.push(Object.assign({}, base, { type: p.type, amount: amt, amount_zar: amt,
       account: own ? p.from : p.pocket, to_account: own ? p.pocket : '',
@@ -1174,6 +1183,15 @@ async function savePayment() {
     const fb = store.getJSON('fundByAccount', {});
     split.parts.forEach(p => { if (p.pocket && p.fund && !p.fundFrom && p.type !== 'transfer' && !typeOf(p.type).held) fb[p.pocket] = p.fund; });
     store.setJSON('fundByAccount', fb);
+    const r = split.receipt;
+    if (r && r.url) {
+      const p0 = split.parts[0] || {};
+      store.setJSON('lastScan', { account: split.account, pocket: p0.pocket, fund: p0.fund, category: p0.category });
+      if (r.file_id) {
+        try { await attachReceipt(r, rows, (r.items || []).map(it => Object.assign({}, it, { part: it.part + 1 }))); }
+        catch (e) { toast('Saved, but the receipt name and items were not saved: ' + e.message, true); }
+      }
+    }
     toast(`Saved ${money(num(split.total))}`);
     split.ready = false;
     location.hash = '#pay/' + encodeURIComponent(res.group_id);
@@ -1186,7 +1204,7 @@ async function savePayment() {
 async function saveDraft() {
   const msg = $('form-msg');
   const data = {};
-  for (const k of ['mode', 'total', 'date', 'account', 'paid_to', 'note', 'fee', 'fee_part', 'parts', 'editGroup', 'editIds']) data[k] = split[k];
+  for (const k of ['mode', 'total', 'date', 'account', 'paid_to', 'note', 'fee', 'fee_part', 'parts', 'editGroup', 'editIds', 'receipt']) data[k] = split[k];
   const btn = $('save-draft'); btn.disabled = true; btn.textContent = 'Saving draft…';
   try {
     const d = await api('saveDraft', { id: split.draftId || '', data: JSON.stringify(data) });
@@ -1245,10 +1263,12 @@ function renderPay(v, gid) {
     </dl></div>
     <h2>${cash.length} part${cash.length === 1 ? '' : 's'}</h2>
     <div class="card">${cash.map(partLine).join('')}</div>
+    ${receiptButtons(rows)}
     <button class="ghost" id="edit">Edit payment</button>
     <button class="ghost danger" id="del">Delete payment</button>
     <button class="ghost" onclick="history.back()">Back</button>`;
   $('edit').onclick = () => { split.ready = false; location.hash = '#split/edit/' + encodeURIComponent(gid); };
+  bindReceiptButtons(rows, () => renderPay(v, gid));
   $('del').onclick = async () => {
     if (!confirm(`Delete this payment and all ${rows.length} of its rows?`)) return;
     try {
@@ -1338,10 +1358,12 @@ function renderTx(v, id) {
       ${num(t.fee) ? item('Bank fee', money(num(t.fee))) : ''}
       ${item('Note', t.note)}
     </dl></div>
+    ${receiptButtons([t])}
     ${canEdit ? '<button class="ghost" id="edit">Edit or split</button>' : ''}
     <button class="ghost danger" id="del">Delete entry</button>
     <button class="ghost" onclick="history.back()">Back</button>`;
   if ($('edit')) $('edit').onclick = () => { split.ready = false; location.hash = '#split/edit/' + encodeURIComponent(t.id); };
+  bindReceiptButtons([t], () => renderTx(v, encodeURIComponent(t.id)));
   $('del').onclick = async () => {
     if (!confirm('Delete this entry?')) return;
     try {
@@ -1351,6 +1373,228 @@ function renderTx(v, id) {
     } catch (e) {
       toast(/Unknown action/.test(e.message) ? 'Delete needs the updated Apps Script (see Settings). For now, delete the row in the sheet.' : 'Not deleted: ' + e.message, true);
     }
+  };
+}
+
+// ---------- Receipts ----------
+// "Scan receipt": pick a scanned PDF or take a photo. The Apps Script saves it in Drive (Receipts
+// folder) and reads shop, date, total and items with OpenAI. The app then opens the payment screen
+// filled in, or attaches the receipt to an entry that is already there (same amount, within 3 days).
+
+const pickFile = () => new Promise(resolve => {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'application/pdf,image/*';
+  inp.style.display = 'none';
+  document.body.appendChild(inp);
+  inp.onchange = () => { const f = inp.files && inp.files[0]; inp.remove(); resolve(f || null); };
+  inp.click();
+});
+
+const fileB64 = file => new Promise((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve(String(r.result).split(',')[1] || '');
+  r.onerror = () => reject(new Error('Could not read the file'));
+  r.readAsDataURL(file);
+});
+
+// Photos are made smaller (longest side 1600px) so they upload fast and cost less to read.
+function photoB64(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const k = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL('image/jpeg', 0.85).split(',')[1]);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not open the photo')); };
+    img.src = url;
+  });
+}
+
+function openSheet(html) {
+  const bg = document.createElement('div');
+  bg.className = 'sheet-bg';
+  bg.innerHTML = `<div class="sheet">${html}</div>`;
+  document.body.appendChild(bg);
+  return { el: bg, close: () => bg.remove() };
+}
+
+// Picks a file, uploads it and returns the receipt: { file_id, url, ext, shop, date, total, items, read_error }.
+async function scanReceipt() {
+  const file = await pickFile();
+  if (!file) return null;
+  const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
+  if (isPdf && file.size > 15e6) { toast('This PDF is too big (over 15 MB).', true); return null; }
+  const wait = openSheet('<h3>Reading the receipt…</h3><p class="muted">Saving it to Drive and reading it. This takes about 10 seconds.</p>');
+  try {
+    const b64 = isPdf ? await fileB64(file) : await photoB64(file);
+    const r = await api('scanReceipt', { b64, mime: isPdf ? 'application/pdf' : 'image/jpeg' });
+    return { file_id: r.file_id, url: r.url, ext: r.ext || (isPdf ? 'pdf' : 'jpg'), shop: r.shop || '', date: r.date || '',
+      total: num(r.total) || 0, read_error: r.read_error || '',
+      items: (r.items || []).map(it => ({ name: it.name, qty: it.qty, amount: num(it.amount), part: 0 })) };
+  } catch (e) {
+    toast('Receipt not read: ' + needsNewScript(e), true);
+    return null;
+  } finally { wait.close(); }
+}
+
+const receiptNote = r => {
+  const names = r.items.filter(it => num(it.amount) > 0).map(it => it.name).filter(Boolean);
+  let s = (r.shop ? r.shop + (names.length ? ': ' : '') : '') + names.join(', ');
+  return s.length > 140 ? s.slice(0, 137) + '…' : s;
+};
+const receiptFileName = (r, date, total, person) =>
+  [date, 'R' + round2(total).toFixed(2), r.shop || 'receipt', person || ''].filter(Boolean).join(' ').replace(/[\\/:*?"<>|]+/g, '-') + '.' + (r.ext || 'pdf');
+
+// Money-out entries that this receipt may belong to: same amount (without the bank fee), within 3 days, no receipt yet.
+function receiptMatches(r) {
+  if (!(r.total > 0)) return [];
+  const day = r.date || localDay(new Date());
+  const near = d => Math.abs((new Date(d) - new Date(day)) / 864e5) <= 3;
+  return listItems(sortedTxs(), false).map(it => {
+    const rows = it.t ? [it.t] : groupRows(it.g), cash = cashRows(rows);
+    if (!cash.length || rows.some(t => t.receipt_url)) return null;
+    const out = it.t ? typeOf(it.t.type).dir < 0 : groupOut(cash);
+    const total = round2(cash.reduce((s, t) => s + num(t.amount), 0));
+    if (!out || Math.abs(total - r.total) > 0.01 || !near(cash[0].date)) return null;
+    return { it, rows, total, date: cash[0].date };
+  }).filter(Boolean).slice(0, 3);
+}
+
+async function attachReceipt(r, rows, items) {
+  const first = rows[0];
+  const total = cashRows(rows).reduce((s, t) => s + num(t.amount), 0);
+  const person = (rows.find(t => t.person) || {}).person;
+  await api('attachReceipt', { url: r.url, file_id: r.file_id || '', ids: rows.map(t => t.id), group_id: first.group_id || '',
+    name: r.file_id ? receiptFileName(r, first.date, total, person ? nameOf(L.people(), person) : '') : '',
+    shop: r.shop, date: r.date || first.date, items: items || [] });
+  rows.forEach(t => { t.receipt_url = r.url; });
+  store.setJSON('cacheTxs', state.txs);
+}
+
+// Home and Add: scan, then attach to a matching entry or open a new payment.
+async function startReceipt() {
+  const r = await scanReceipt();
+  if (!r) return;
+  const matches = r.read_error ? [] : receiptMatches(r);
+  if (!matches.length) { openReceiptPayment(r); return; }
+  const sh = openSheet(`<h3>Already entered?</h3>
+    <p class="muted">${esc(r.shop || 'Receipt')} · ${money(r.total)}${r.date ? ' · ' + esc(niceDate(r.date)) : ''}</p>
+    ${matches.map((m, i) => {
+      const t = m.rows[0];
+      const bits = [niceDate(m.date), nameOf(L.accounts(), topOf(rowAcc(t))), t.note || ''].filter(Boolean).join(' · ');
+      return `<button type="button" class="ghost" data-m="${i}">Attach to: ${esc(bits)}</button>`;
+    }).join('')}
+    <button type="button" class="primary" id="rc-new">No, new entry</button>`);
+  sh.el.querySelectorAll('[data-m]').forEach(b => b.onclick = async () => {
+    const m = matches[Number(b.dataset.m)];
+    b.disabled = true; b.textContent = 'Attaching…';
+    try {
+      await attachReceipt(r, m.rows, r.items.map(it => Object.assign({}, it, { part: '' })));
+      sh.close(); toast('Receipt attached');
+      location.hash = m.it.g ? '#pay/' + encodeURIComponent(m.it.g) : '#tx/' + encodeURIComponent(m.it.t.id);
+    } catch (e) { b.disabled = false; toast('Not attached: ' + needsNewScript(e), true); }
+  });
+  $('rc-new').onclick = () => { sh.close(); openReceiptPayment(r); };
+}
+
+function openReceiptPayment(r) {
+  const accs = fromAccounts();
+  const tyme = accs.find(a => a.id === 'tyme');
+  const last = store.getJSON('lastScan', {});
+  const part = { amount: r.total ? String(r.total) : '' };
+  if (last.pocket) Object.assign(part, { pocket: last.pocket, fund: last.fund || '', category: last.category || '' });
+  splitSeed = { mode: 'out', total: r.total ? String(r.total) : '', date: r.date || localDay(new Date()),
+    account: last.account || (tyme && tyme.id) || '', note: receiptNote(r), parts: [part], receipt: r };
+  split.ready = false;
+  if (location.hash === '#split') render(); else location.hash = '#split';
+}
+
+// Items decide the amounts of the parts they are in. If the item lines don't add up to the total
+// (prices without VAT, a discount missed), each part gets its share of the total.
+function applyReceiptItems() {
+  const r = split.receipt;
+  if (!r || !r.items || !r.items.length) return;
+  // Parts made by moving items, now empty, are removed.
+  for (let i = split.parts.length - 1; i > 0; i--) {
+    if (split.parts[i].auto && !r.items.some(it => it.part === i)) {
+      split.parts.splice(i, 1);
+      r.items.forEach(it => { if (it.part > i) it.part--; });
+      if (split.fee_part >= split.parts.length) split.fee_part = 0;
+    }
+  }
+  const itemsSum = r.items.reduce((s, it) => s + num(it.amount), 0), total = num(split.total);
+  if (!itemsSum || !total) return;
+  const used = [...new Set(r.items.map(it => it.part))].filter(i => split.parts[i]);
+  const f = total / itemsSum;
+  let assigned = 0, biggest = -1;
+  used.forEach(i => {
+    const its = r.items.filter(it => it.part === i), p = split.parts[i];
+    const a = round2(its.reduce((s, it) => s + num(it.amount), 0) * f);
+    p.amount = String(a); assigned += a;
+    if (split.parts.length > 1 && (!p.note || p.note === p.autoNote)) { p.autoNote = its.map(it => it.name).join(', ').slice(0, 100); p.note = p.autoNote; }
+    if (biggest < 0 || a > num(split.parts[biggest].amount)) biggest = i;
+  });
+  if (split.parts.length === 1 && split.parts[0].note === split.parts[0].autoNote) split.parts[0].note = split.parts[0].autoNote = '';
+  // Rounding cents go to the biggest part, so the parts add up to the total.
+  const manual = split.parts.reduce((s, p, i) => used.includes(i) ? s : s + num(p.amount), 0);
+  const diff = round2(total - manual - assigned);
+  if (biggest >= 0 && Math.abs(diff) < 0.05) split.parts[biggest].amount = String(round2(num(split.parts[biggest].amount) + diff));
+}
+
+// Tapping an item's part number moves it to the next part; past the last part, a new part is made.
+function moveReceiptItem(i) {
+  const r = split.receipt, it = r.items[i];
+  const alone = !r.items.some((x, j) => j !== i && x.part === it.part);
+  let next = it.part + 1;
+  if (next >= split.parts.length) {
+    if (alone && split.parts.length > 1 && split.parts[it.part].auto) next = 0;
+    else {
+      const p = newPart();
+      const src = split.parts[it.part];
+      Object.assign(p, { fund: src.fund, pocket: src.pocket, category: src.category, person: src.person, auto: true });
+      split.parts.push(p); next = split.parts.length - 1;
+    }
+  }
+  it.part = next;
+  applyReceiptItems();
+}
+
+function receiptBox() {
+  const r = split.receipt;
+  if (!r) return '';
+  const head = `<div class="t1">Receipt${r.shop ? ': ' + esc(r.shop) : ''}</div>
+    <div class="t2">${r.date ? esc(niceDate(r.date)) + ' · ' : ''}${r.total ? money(r.total) + ' · ' : ''}<a class="link" href="${esc(r.url)}" target="_blank" rel="noopener">Open</a></div>`;
+  if (r.read_error) return `<div class="card pad receipt">${head}<div class="hint err">Couldn't read it: ${esc(r.read_error)} The receipt is saved; type the amounts.</div></div>`;
+  if (!r.items || !r.items.length) return `<div class="card pad receipt">${head}</div>`;
+  const itemsSum = round2(r.items.reduce((s, it) => s + num(it.amount), 0));
+  const rows = r.items.map((it, i) => `<div class="ritem"><span class="rname">${esc(it.name)}${it.qty > 1 ? ` <span class="muted">×${esc(it.qty)}</span>` : ''}</span>
+    <span class="ramt">${money(num(it.amount))}</span><button type="button" class="rpart" data-item="${i}" aria-label="Move to next part">${it.part + 1}</button></div>`).join('');
+  return `<div class="card pad receipt">${head}
+    <div class="ritems">${rows}</div>
+    <div class="hint">Tap a part number to move an item to another part.${r.total && Math.abs(itemsSum - r.total) > 0.01 ? ` The items add up to ${money(itemsSum)}, so each part gets its share of ${money(r.total)}.` : ''}</div></div>`;
+}
+
+// Entry and payment pages: open the receipt, or scan one and attach it.
+function receiptButtons(rows) {
+  const url = (rows.find(t => t.receipt_url) || {}).receipt_url;
+  return `${url ? `<a class="ghost btn-link" href="${esc(url)}" target="_blank" rel="noopener">Open receipt</a>` : ''}
+    <button type="button" class="ghost" id="attach-receipt">${url ? 'Replace receipt' : 'Attach receipt'}</button>`;
+}
+function bindReceiptButtons(rows, redraw) {
+  const btn = $('attach-receipt'); if (!btn) return;
+  btn.onclick = async () => {
+    const r = await scanReceipt();
+    if (!r) return;
+    try {
+      await attachReceipt(r, rows, r.items.map(it => Object.assign({}, it, { part: '' })));
+      const total = round2(cashRows(rows).reduce((s, t) => s + num(t.amount), 0));
+      toast(r.total && Math.abs(r.total - total) > 0.01 ? `Attached. Note: the receipt says ${money(r.total)}, the entry ${money(total)}.` : 'Receipt attached', r.total && Math.abs(r.total - total) > 0.01);
+      redraw();
+    } catch (e) { toast('Not attached: ' + needsNewScript(e), true); }
   };
 }
 
