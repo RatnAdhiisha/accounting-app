@@ -307,7 +307,14 @@ function toast(msg, isErr) {
 // ---------- Views ----------
 
 function route() { return (location.hash || '#home').slice(1).split('/'); }
+// A screen that fails to draw shows the error instead of a blank page.
 function render() {
+  try { renderView(); } catch (e) {
+    $('view').innerHTML = `<header><h1>Something went wrong</h1></header><p class="err small">${esc(e.message)}</p>
+      <p class="muted small">Version ${VERSION}. Please send a screenshot of this.</p>`;
+  }
+}
+function renderView() {
   const [tab, arg] = route();
   document.querySelectorAll('.tabs a').forEach(a => a.classList.toggle('on', a.dataset.tab === tab));
   const needSetup = !store.get('scriptUrl');
@@ -2075,6 +2082,8 @@ window.addEventListener('hashchange', () => {
   render(); window.scrollTo(0, 0);
 });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && store.get('scriptUrl')) refresh(); });
+// The phone's saved copy of planned items may come from an older version (no "skip" yet).
+try { state.planned = (state.planned || []).map(normPlan); } catch (e) { state.planned = []; }
 if (route()[0] === 'add') resetForm();
 if (route()[0] === 'split' && route()[1] !== 'draft' && route()[1] !== 'edit') location.replace('#add');
 render();
