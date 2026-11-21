@@ -345,6 +345,12 @@ function renderHome(v) {
   const plan = planStatus();
   // "R650 after planned" under each fund (whose money is left after plans). Not shown on pockets
   // or the total: allocations are often not tied to a pocket, so it would give a mixed picture.
+  // People's debts belong to a fund: "R505 owed back" (people owe it), "R470 owed to others".
+  const fundOwed = fid => {
+    let back = 0, others = 0;
+    for (const k in b.person) { if (k.split('|')[1] !== fid) continue; const x = b.person[k]; if (x > 0) back += x; else others -= x; }
+    return (back > 0.004 ? `<div class="muted small">${money(back)} owed back</div>` : '') + (others > 0.004 ? `<div class="muted small">${money(others)} owed to others</div>` : '');
+  };
   const after = (x, left) => left > 0.004 ? `<div class="small ${x - left < 0 ? 'err' : 'muted'}">${money(x - left)} after planned</div>` : '';
 
   // Accounts, with pockets under their parent.
@@ -378,7 +384,7 @@ function renderHome(v) {
     const x = b.fund[f.id] || 0;
     // Personal also holds money kept for people without a fund of their own (Ana's R100).
     const kept = f.id !== 'personal' ? 0 : Object.keys(b.held).filter(k => k.split('|')[2] === f.id).reduce((s, k) => s + b.held[k], 0);
-    const extra = (kept > 0.004 ? `<div class="muted small">${money(kept)} kept for others</div>` : '') + after(x, plan.byFund[f.id] || 0);
+    const extra = (kept > 0.004 ? `<div class="muted small">${money(kept)} kept for others</div>` : '') + fundOwed(f.id) + after(x, plan.byFund[f.id] || 0);
     return `<div class="row"><span class="name">${esc(f.name)}</span><span class="amt ${x < 0 ? 'neg' : ''}">${money(x)}${extra}</span></div>`;
   }).join('');
 
@@ -411,9 +417,6 @@ function renderHome(v) {
     return `<div class="row tap" data-held="${esc(k)}"><span class="name">${esc(nameOf(L.people(), pid))} <span class="muted small">${x > 0 ? 'on' : 'spent more than kept on'} ${esc(nameOf(L.accounts(), aid))}</span></span>
       <span class="amt ${x < 0 ? 'neg' : ''}">${money(Math.abs(x))}<div><button type="button" class="link">Bought for ›</button></div></span></div>`;
   }).join('');
-  const all = Object.values(b.person);
-  const owesMe = all.filter(x => x > 0).reduce((s, x) => s + x, 0);
-  const iOwe = all.filter(x => x < 0).reduce((s, x) => s - x, 0);
 
   const recent = listItems(sortedTxs(), false).slice(0, 5);
   const drafts = state.drafts.map(d => Object.assign({ id: d.id }, draftInfo(d)));
@@ -425,7 +428,6 @@ function renderHome(v) {
     <div class="total-box">
       <div class="small">All money${missingRate ? ' (foreign cash without a rate left out)' : ''}</div>
       <div class="big">${money(totalZar)}</div>
-      ${owesMe || iOwe ? `<div class="small">${owesMe ? 'Owed back ' + money(owesMe) : ''}${owesMe && iOwe ? ' · ' : ''}${iOwe ? 'Owed to others ' + money(iOwe) : ''}</div>` : ''}
     </div>
     ${drafts.length ? `<h2>Drafts to finish</h2><div class="card">${drafts.map(d => `<div class="tx" data-draft="${esc(d.id)}"><div class="l"><div class="t1">${esc(d.who)}</div><div class="t2">${esc(niceDate(d.date))} · ${d.left ? money(d.left) + ' left to assign' : 'ready to save'}</div></div><div class="amt">${money(d.total)}</div></div>`).join('')}</div>` : ''}
     ${plan.soon.length ? `<h2>Due soon</h2><div class="card">${plan.soon.map(billRow).join('')}</div>` : ''}
