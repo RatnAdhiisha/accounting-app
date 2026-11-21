@@ -1537,9 +1537,8 @@ function planStatus() {
   }
   for (const b of billList) {
     if (b.paid) continue;
-    // A monthly bill paid up to 10 days early counts (data bought on 31 Oct for 1 Nov).
-    const from = b.p.repeat === 'once' ? addDays(b.due || today, -14) : [ym + '-01', addDays(b.due, -10)].sort()[0];
-    const t = state.txs.filter(t => !claimed.has(t.id) && t.date >= from && (b.p.repeat === 'once' || t.date <= ym + '-31') && billMatch(b.p, t))
+    const from = b.p.repeat === 'once' ? addDays(b.due || today, -14) : ym + '-01';
+    const t = state.txs.filter(t => !claimed.has(t.id) && t.date >= from && (b.p.repeat === 'once' || monthOf(t.date) === ym) && billMatch(b.p, t))
       .sort((x, y) => x.date.localeCompare(y.date))[0];
     if (t) { b.paid = t; claimed.add(t.id); }
   }
@@ -1548,13 +1547,7 @@ function planStatus() {
     if (p.repeat === 'once' && b.due && monthOf(b.due) > ym) { later.push(b); continue; }
     // A one-off bill paid in an earlier month is done: not shown any more.
     if (p.repeat === 'once' && b.paid && monthOf(b.paid.date) < ym) continue;
-    // A monthly bill added after its day this month (Data bundle on the 1st, added on the 21st)
-    // starts next month: nothing is due or overdue now.
-    if (p.repeat === 'monthly' && !b.paid && p.start && p.start > b.due) {
-      b.next = true; const [y, m] = ym.split('-').map(Number);
-      const nym = localDay(new Date(y, m, 1)).slice(0, 7); b.due = dueOn(p, nym);
-    }
-    b.left = b.paid || b.next ? 0 : p.amount;
+    b.left = b.paid ? 0 : p.amount;
     b.overdue = !b.paid && b.due < today;
     b.soon = !b.paid && b.due <= soonTo;
     // Stopped or failed subscriptions: not paid 5 days after the day.
@@ -1592,7 +1585,7 @@ const planWhere = p => [p.account ? accName(p.account).replace(/^TymeBank /, 'Ty
   p.person ? nameOf(L.people(), p.person) : ''].filter(Boolean).join(' · ');
 function billRow(b) {
   const p = b.p;
-  const when = b.paid ? `Paid ${niceDate(b.paid.date)} ✓` : b.next ? `Starts ${niceDate(b.due)}` : b.overdue ? `Due ${niceDate(b.due)}, overdue` : `Due ${niceDate(b.due)}`;
+  const when = b.paid ? `Paid ${niceDate(b.paid.date)} ✓` : b.overdue ? `Due ${niceDate(b.due)}, overdue` : `Due ${niceDate(b.due)}`;
   return `<div class="row tap" data-plan="${esc(p.id)}"><span class="name">${esc(p.name)}
       <div class="muted small ${b.overdue ? 'err' : ''}">${esc(when)}</div>
       <div class="muted small">${esc(planWhere(p))}</div>${b.flag ? `<div class="small err">${esc(b.flag)}</div>` : ''}</span>
