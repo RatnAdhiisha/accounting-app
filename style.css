@@ -129,3 +129,7 @@ dl { margin:0; } dt { color:var(--muted); font-size:13px; margin-top:10px; } dd 
 .ritem .ramt { white-space:nowrap; }
 .rpart { min-width:34px; height:34px; border-radius:17px; border:1px solid var(--accent); background:var(--card); color:var(--accent); font-weight:600; font-size:15px; }
 a.btn-link { display:block; box-sizing:border-box; text-align:center; text-decoration:none; }
+.rmatch { margin-top:10px; padding:10px; border-radius:10px; background:var(--bg); font-size:14px; }
+.rmatch button.ghost { margin-top:8px; }
+.spin { display:inline-block; width:14px; height:14px; margin-right:8px; vertical-align:-2px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }

@@ -17,6 +17,10 @@ part number to move it to another part; part amounts follow the items. On save t
 (`2026-11-20 R1486.50 Build It Soweto.pdf`), `receipt_url` is set on every part, and the items go to the
 **Receipt items** tab. Entries also get **Open receipt** and **Attach receipt**.
 
+Since 0.9.2 the payment screen opens at once: while the receipt is saved and read, pick pocket, fund and category.
+When reading is done, total, date, note and items fill in (only where nothing was typed), and a matching entry
+shows as **Attach to that entry instead**. Save waits until reading is done. No Apps Script change.
+
 **After merging, set it up once:**
 1. Apps Script > Project Settings > Script Properties > add `OPENAI_API_KEY` (your OpenAI key). Optional: `OPENAI_MODEL` (default `gpt-5-mini`).
 2. Paste the new `apps-script/Code.gs`, Save, then run `checkReceipts` once from the editor and allow Drive and external access. The log shows the folder link and "OpenAI key works."
