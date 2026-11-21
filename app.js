@@ -1,7 +1,7 @@
 // Accounting app: quick entry, split payments, balances home screen, entry list, new people, planned spending.
 'use strict';
 
-const VERSION = '0.8.1';
+const VERSION = '0.8.2';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -431,6 +431,7 @@ function renderHome(v) {
     ${drafts.length ? `<h2>Drafts to finish</h2><div class="card">${drafts.map(d => `<div class="tx" data-draft="${esc(d.id)}"><div class="l"><div class="t1">${esc(d.who)}</div><div class="t2">${esc(niceDate(d.date))} · ${d.left ? money(d.left) + ' left to assign' : 'ready to save'}</div></div><div class="amt">${money(d.total)}</div></div>`).join('')}</div>` : ''}
     ${plan.soon.length ? `<h2>Due soon</h2><div class="card">${plan.soon.map(billRow).join('')}</div>` : ''}
     <h2>Accounts</h2><div class="card">${accRows}</div>
+    ${plan.noPocket > 0.004 ? `<div class="hint">${money(plan.noPocket)} planned with no pocket (${esc(plan.noPocketNames)}) is taken off the total and its fund, not off a pocket.</div>` : ''}
     <h2>Funds (whose money)</h2><div class="card">${fundRows}</div>
     ${fundDebtRows ? `<h2>Funds that owe each other</h2><div class="card">${fundDebtRows}</div>
       <div class="hint">When one fund's money pays for another fund, the other fund owes it back.</div>` : ''}
@@ -1576,7 +1577,8 @@ function planStatus() {
     if (x.p.account) byAcc[x.p.account] = (byAcc[x.p.account] || 0) + x.left;
     if (x.p.fund) byFund[x.p.fund] = (byFund[x.p.fund] || 0) + x.left;
   }
-  return { ym, today, bills, later, allocs, byAcc, byFund, left: round2(left), soon: bills.filter(b => b.soon) };
+  const loose = allocs.filter(a => a.left && !a.p.account);
+  return { noPocket: round2(loose.reduce((s, a) => s + a.left, 0)), noPocketNames: loose.map(a => a.p.name).join(', '), ym, today, bills, later, allocs, byAcc, byFund, left: round2(left), soon: bills.filter(b => b.soon) };
 }
 
 const planWhere = p => [p.account ? accName(p.account).replace(/^TymeBank /, 'Tyme ') : 'Any pocket', p.fund ? nameOf(L.funds(), p.fund) : 'any fund',
