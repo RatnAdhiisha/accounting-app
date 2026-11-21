@@ -1856,7 +1856,10 @@ async function skipPlanned(id, btn) {
   const p = byId(state.planned, id); if (!p) return;
   const ym = monthOf(localDay(new Date()));
   const skip = p.skip.includes(ym) ? p.skip.filter(m => m !== ym) : p.skip.concat([ym]);
-  btn.disabled = true;
+  // Show that it is working: the button says "Skipping…" and the row fades until it is saved.
+  const label = btn.textContent, row = btn.closest('.row');
+  btn.disabled = true; btn.textContent = skip.includes(ym) ? 'Skipping…' : 'Undoing…';
+  if (row) row.style.opacity = '0.5';
   try {
     const res = await api('savePlanned', Object.assign({}, p, { skip: skip.join(',') }));
     if (res.columns && !res.columns.includes('skip') || !res.columns) throw new Error('Skip needs the updated Apps Script (Code.gs, 21 Nov 2026).');
@@ -1864,7 +1867,7 @@ async function skipPlanned(id, btn) {
     state.planned = state.planned.map(x => x.id === id ? saved : x); store.setJSON('cachePlanned', state.planned);
     toast(skip.includes(ym) ? `Skipped ${p.name} this month` : `${p.name} is due again`);
     render();
-  } catch (e) { btn.disabled = false; toast(needsNewScript(e), true); }
+  } catch (e) { btn.disabled = false; btn.textContent = label; if (row) row.style.opacity = ''; toast(needsNewScript(e), true); }
 }
 // Opens the Add form filled in from the bill; saving it ticks the bill.
 function payPlanned(id) {
