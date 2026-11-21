@@ -1,7 +1,7 @@
 // Accounting app: quick entry, split payments, balances home screen, entry list, new people, planned spending, receipts.
 'use strict';
 
-const VERSION = '0.9.2';
+const VERSION = '0.9.3';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -1204,10 +1204,10 @@ async function savePayment() {
     split.parts.forEach(p => { if (p.pocket && p.fund && !p.fundFrom && p.type !== 'transfer' && !typeOf(p.type).held) fb[p.pocket] = p.fund; });
     store.setJSON('fundByAccount', fb);
     const r = split.receipt;
-    if (r && r.url) {
+    if (r && (r.url || r._file)) {
       const p0 = split.parts[0] || {};
       store.setJSON('lastScan', { account: split.account, pocket: p0.pocket, fund: p0.fund, category: p0.category });
-      if (r.file_id) {
+      if (r.file_id || r._file) {
         try { await attachReceipt(r, rows, (r.items || []).map(it => Object.assign({}, it, { part: it.part + 1 }))); }
         catch (e) { toast('Saved, but the receipt name and items were not saved: ' + e.message, true); }
       }
@@ -1228,6 +1228,14 @@ async function saveDraft() {
   for (const k of ['mode', 'total', 'date', 'account', 'paid_to', 'note', 'fee', 'fee_part', 'parts', 'editGroup', 'editIds', 'receipt']) data[k] = split[k];
   const btn = $('save-draft'); btn.disabled = true; btn.textContent = 'Saving draft…';
   try {
+    // A draft keeps its receipt in Drive (it can't hold the file itself).
+    const r = split.receipt;
+    if (r && r._file) {
+      const res = await api('attachReceipt', { b64: r._file.b64, mime: r._file.mime, ids: [], items: [],
+        name: receiptFileName(r, split.date, num(split.total), '') });
+      r.url = res.url; r.file_id = res.file_id; delete r._file;
+      data.receipt = r;
+    }
     const d = await api('saveDraft', { id: split.draftId || '', data: JSON.stringify(data) });
     state.drafts = state.drafts.filter(x => x.id !== d.id).concat([d]); store.setJSON('cacheDrafts', state.drafts);
     toast('Draft saved');
@@ -1450,8 +1458,10 @@ const tooBig = file => isPdfFile(file) && file.size > 15e6;
 async function uploadReceipt(file) {
   const isPdf = isPdfFile(file);
   const b64 = isPdf ? await fileB64(file) : await photoB64(file);
-  const r = await api('scanReceipt', { b64, mime: isPdf ? 'application/pdf' : 'image/jpeg' });
-  return { file_id: r.file_id, url: r.url, ext: r.ext || (isPdf ? 'pdf' : 'jpg'), shop: r.shop || '', date: r.date || '',
+  const mime = isPdf ? 'application/pdf' : 'image/jpeg';
+  // Only read now; the file is saved to Drive when the entry (or draft) is saved.
+  const r = await api('scanReceipt', { b64, mime, save: false });
+  return { _file: { b64, mime }, file_id: r.file_id || '', url: r.url || '', ext: r.ext || (isPdf ? 'pdf' : 'jpg'), shop: r.shop || '', date: r.date || '',
     total: num(r.total) || 0, read_error: r.read_error || '',
     items: (r.items || []).map(it => ({ name: it.name, qty: it.qty, amount: num(it.amount), part: 0 })) };
 }
@@ -1475,18 +1485,19 @@ const receiptNote = r => {
 const receiptFileName = (r, date, total, person) =>
   [date, 'R' + round2(total).toFixed(2), r.shop || 'receipt', person || ''].filter(Boolean).join(' ').replace(/[\\/:*?"<>|]+/g, '-') + '.' + (r.ext || 'pdf');
 
-// Money-out entries that this receipt may belong to: same amount (without the bank fee), within 3 days, no receipt yet.
+// Money-out entries that this receipt may belong to: same amount (without the bank fee), within 3 days.
+// Entries that already have a receipt come back with has: true (probably this same receipt).
 function receiptMatches(r) {
   if (!(r.total > 0)) return [];
   const day = r.date || localDay(new Date());
   const near = d => Math.abs((new Date(d) - new Date(day)) / 864e5) <= 3;
   return listItems(sortedTxs(), false).map(it => {
-    const rows = it.t ? [it.t] : groupRows(it.g), cash = cashRows(rows);
-    if (!cash.length || rows.some(t => t.receipt_url)) return null;
+    const rows = it.t ? [it.t] : groupRows(it.g), cash = it.t ? rows : cashRows(rows);
+    if (!cash.length) return null;
     const out = it.t ? typeOf(it.t.type).dir < 0 : groupOut(cash);
     const total = round2(cash.reduce((s, t) => s + num(t.amount), 0));
     if (!out || Math.abs(total - r.total) > 0.01 || !near(cash[0].date)) return null;
-    return { it, rows, total, date: cash[0].date };
+    return { it, rows, total, date: cash[0].date, has: rows.some(t => t.receipt_url) };
   }).filter(Boolean).slice(0, 3);
 }
 
@@ -1494,9 +1505,12 @@ async function attachReceipt(r, rows, items) {
   const first = rows[0];
   const total = cashRows(rows).reduce((s, t) => s + num(t.amount), 0);
   const person = (rows.find(t => t.person) || {}).person;
-  await api('attachReceipt', { url: r.url, file_id: r.file_id || '', ids: rows.map(t => t.id), group_id: first.group_id || '',
-    name: r.file_id ? receiptFileName(r, first.date, total, person ? nameOf(L.people(), person) : '') : '',
-    shop: r.shop, date: r.date || first.date, items: items || [] });
+  const file = !r.file_id && r._file;
+  const name = r.file_id || file ? receiptFileName(r, first.date, total, person ? nameOf(L.people(), person) : '') : '';
+  const res = await api('attachReceipt', Object.assign({ url: r.url, file_id: r.file_id || '', ids: rows.map(t => t.id),
+    group_id: first.group_id || '', name, shop: r.shop, date: r.date || first.date, items: items || [] },
+    file ? { b64: file.b64, mime: file.mime } : {}));
+  if (res && res.url) { r.url = res.url; r.file_id = res.file_id || r.file_id; delete r._file; }
   rows.forEach(t => { t.receipt_url = r.url; });
   store.setJSON('cacheTxs', state.txs);
 }
@@ -1521,7 +1535,7 @@ async function readInto(r) {
   let res;
   try { res = await uploadReceipt(file); }
   catch (e) { res = { failed: true, read_error: needsNewScript(e), items: [] }; }
-  if (split.receipt !== r) return; // you left this payment; the file stays in Drive
+  if (split.receipt !== r) return; // you left this payment; nothing was saved to Drive
   if (split.syncFn && route()[0] === 'split' && $('s-total')) split.syncFn();
   Object.assign(r, res, { pending: false });
   if (!r.failed && !r.read_error) {
@@ -1530,7 +1544,7 @@ async function readInto(r) {
     if (!split.note.trim()) split.note = receiptNote(r);
     if (split.parts.length === 1 && !num(split.parts[0].amount) && num(split.total)) split.parts[0].amount = split.total;
     r.matches = receiptMatches(r).map(m => ({ g: m.it.g || '', id: m.it.t ? m.it.t.id : '', date: m.date,
-      label: [niceDate(m.date), nameOf(L.accounts(), topOf(rowAcc(m.rows[0]))), m.rows[0].note || ''].filter(Boolean).join(' · ') }));
+      has: m.has, label: [niceDate(m.date), nameOf(L.accounts(), topOf(rowAcc(m.rows[0]))), money(m.total), m.rows[0].note || ''].filter(Boolean).join(' · ') }));
   }
   if (route()[0] === 'split') renderSplit($('view'), route().slice(1));
 }
@@ -1606,14 +1620,17 @@ function receiptBox() {
   if (r.failed) return `<div class="card pad receipt"><div class="t1">Receipt not saved</div>
     <div class="hint err">${esc(r.read_error)}</div>${receiptFiles.has(r) ? '<button type="button" class="ghost" id="rc-retry">Try again</button>' : ''}</div>`;
   const head = `<div class="t1">Receipt${r.shop ? ': ' + esc(r.shop) : ''}</div>
-    <div class="t2">${r.date ? esc(niceDate(r.date)) + ' · ' : ''}${r.total ? money(r.total) + ' · ' : ''}<a class="link" href="${esc(r.url)}" target="_blank" rel="noopener">Open</a></div>`;
-  if (r.read_error) return `<div class="card pad receipt">${head}<div class="hint err">Couldn't read it: ${esc(r.read_error)} The receipt is saved; type the amounts.</div></div>`;
+    <div class="t2">${r.date ? esc(niceDate(r.date)) + ' · ' : ''}${r.total ? money(r.total) : ''}${r.url ? ` · <a class="link" href="${esc(r.url)}" target="_blank" rel="noopener">Open</a>` : ''}</div>`;
+  if (r.read_error) return `<div class="card pad receipt">${head}<div class="hint err">Couldn't read it: ${esc(r.read_error)} Type the amounts; the receipt is saved with the entry.</div></div>`;
   if (!r.items || !r.items.length) return `<div class="card pad receipt">${head}</div>`;
   const itemsSum = round2(r.items.reduce((s, it) => s + num(it.amount), 0));
   const rows = r.items.map((it, i) => `<div class="ritem"><span class="rname">${esc(it.name)}${it.qty > 1 ? ` <span class="muted">×${esc(it.qty)}</span>` : ''}</span>
     <span class="ramt">${money(num(it.amount))}</span><button type="button" class="rpart" data-item="${i}" aria-label="Move to next part">${it.part + 1}</button></div>`).join('');
-  const matches = (r.matches || []).map((m, i) => `<div class="rmatch">Looks like an entry you already have: ${esc(m.label)}
-    <button type="button" class="ghost" data-attach="${i}">Attach to that entry instead</button></div>`).join('');
+  const matches = (r.matches || []).map((m, i) => m.has
+    ? `<div class="rmatch warn"><b>Already entered?</b> An entry with this amount already has a receipt: ${esc(m.label)}
+      <a class="ghost btn-link" href="${m.g ? '#pay/' + encodeURIComponent(m.g) : '#tx/' + encodeURIComponent(m.id)}">Open that entry</a></div>`
+    : `<div class="rmatch">Looks like an entry you already have: ${esc(m.label)}
+      <button type="button" class="ghost" data-attach="${i}">Attach to that entry instead</button></div>`).join('');
   return `<div class="card pad receipt">${head}${matches}
     <div class="ritems">${rows}</div>
     <div class="hint">Tap a part number to move an item to another part.${r.total && Math.abs(itemsSum - r.total) > 0.01 ? ` The items add up to ${money(itemsSum)}, so each part gets its share of ${money(r.total)}.` : ''}</div></div>`;

@@ -21,6 +21,11 @@ Since 0.9.2 the payment screen opens at once: while the receipt is saved and rea
 When reading is done, total, date, note and items fill in (only where nothing was typed), and a matching entry
 shows as **Attach to that entry instead**. Save waits until reading is done. No Apps Script change.
 
+Since 0.9.3 a scanned receipt is only read at first; the file is saved to Drive when the entry is saved
+(already with its final name), when a draft is saved, or when it is attached to an entry. Scans you don't use leave
+nothing in Drive. Deleting a draft moves its receipt to the Drive bin. A matching entry that already has a
+receipt shows **Already entered?** with a link to it. **Needs the new Code.gs** (paste + new deployment).
+
 **After merging, set it up once:**
 1. Apps Script > Project Settings > Script Properties > add `OPENAI_API_KEY` (your OpenAI key). Optional: `OPENAI_MODEL` (default `gpt-5-mini`).
 2. Paste the new `apps-script/Code.gs`, Save, then run `checkReceipts` once from the editor and allow Drive and external access. The log shows the folder link and "OpenAI key works."
