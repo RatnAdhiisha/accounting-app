@@ -1,7 +1,7 @@
 // Accounting app: quick entry, split payments, balances home screen, entry list, new people, planned spending.
 'use strict';
 
-const VERSION = '0.8.1';
+const VERSION = '0.8.2';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -431,6 +431,7 @@ function renderHome(v) {
     ${drafts.length ? `<h2>Drafts to finish</h2><div class="card">${drafts.map(d => `<div class="tx" data-draft="${esc(d.id)}"><div class="l"><div class="t1">${esc(d.who)}</div><div class="t2">${esc(niceDate(d.date))} · ${d.left ? money(d.left) + ' left to assign' : 'ready to save'}</div></div><div class="amt">${money(d.total)}</div></div>`).join('')}</div>` : ''}
     ${plan.soon.length ? `<h2>Due soon</h2><div class="card">${plan.soon.map(billRow).join('')}</div>` : ''}
     <h2>Accounts</h2><div class="card">${accRows}</div>
+    ${plan.noPocket > 0.004 ? `<div class="hint">${money(plan.noPocket)} planned with no pocket (${esc(plan.noPocketNames)}) is taken off the total and its fund, not off a pocket.</div>` : ''}
     <h2>Funds (whose money)</h2><div class="card">${fundRows}</div>
     ${fundDebtRows ? `<h2>Funds that owe each other</h2><div class="card">${fundDebtRows}</div>
       <div class="hint">When one fund's money pays for another fund, the other fund owes it back.</div>` : ''}
@@ -1536,8 +1537,9 @@ function planStatus() {
   }
   for (const b of billList) {
     if (b.paid) continue;
-    const from = b.p.repeat === 'once' ? addDays(b.due || today, -14) : ym + '-01';
-    const t = state.txs.filter(t => !claimed.has(t.id) && t.date >= from && (b.p.repeat === 'once' || monthOf(t.date) === ym) && billMatch(b.p, t))
+    // A monthly bill paid up to 10 days early counts (data bought on 31 Oct for 1 Nov).
+    const from = b.p.repeat === 'once' ? addDays(b.due || today, -14) : [ym + '-01', addDays(b.due, -10)].sort()[0];
+    const t = state.txs.filter(t => !claimed.has(t.id) && t.date >= from && (b.p.repeat === 'once' || t.date <= ym + '-31') && billMatch(b.p, t))
       .sort((x, y) => x.date.localeCompare(y.date))[0];
     if (t) { b.paid = t; claimed.add(t.id); }
   }
@@ -1546,7 +1548,13 @@ function planStatus() {
     if (p.repeat === 'once' && b.due && monthOf(b.due) > ym) { later.push(b); continue; }
     // A one-off bill paid in an earlier month is done: not shown any more.
     if (p.repeat === 'once' && b.paid && monthOf(b.paid.date) < ym) continue;
-    b.left = b.paid ? 0 : p.amount;
+    // A monthly bill added after its day this month (Data bundle on the 1st, added on the 21st)
+    // starts next month: nothing is due or overdue now.
+    if (p.repeat === 'monthly' && !b.paid && p.start && p.start > b.due) {
+      b.next = true; const [y, m] = ym.split('-').map(Number);
+      const nym = localDay(new Date(y, m, 1)).slice(0, 7); b.due = dueOn(p, nym);
+    }
+    b.left = b.paid || b.next ? 0 : p.amount;
     b.overdue = !b.paid && b.due < today;
     b.soon = !b.paid && b.due <= soonTo;
     // Stopped or failed subscriptions: not paid 5 days after the day.
@@ -1576,14 +1584,15 @@ function planStatus() {
     if (x.p.account) byAcc[x.p.account] = (byAcc[x.p.account] || 0) + x.left;
     if (x.p.fund) byFund[x.p.fund] = (byFund[x.p.fund] || 0) + x.left;
   }
-  return { ym, today, bills, later, allocs, byAcc, byFund, left: round2(left), soon: bills.filter(b => b.soon) };
+  const loose = allocs.filter(a => a.left && !a.p.account);
+  return { noPocket: round2(loose.reduce((s, a) => s + a.left, 0)), noPocketNames: loose.map(a => a.p.name).join(', '), ym, today, bills, later, allocs, byAcc, byFund, left: round2(left), soon: bills.filter(b => b.soon) };
 }
 
 const planWhere = p => [p.account ? accName(p.account).replace(/^TymeBank /, 'Tyme ') : 'Any pocket', p.fund ? nameOf(L.funds(), p.fund) : 'any fund',
   p.person ? nameOf(L.people(), p.person) : ''].filter(Boolean).join(' · ');
 function billRow(b) {
   const p = b.p;
-  const when = b.paid ? `Paid ${niceDate(b.paid.date)} ✓` : b.overdue ? `Due ${niceDate(b.due)}, overdue` : `Due ${niceDate(b.due)}`;
+  const when = b.paid ? `Paid ${niceDate(b.paid.date)} ✓` : b.next ? `Starts ${niceDate(b.due)}` : b.overdue ? `Due ${niceDate(b.due)}, overdue` : `Due ${niceDate(b.due)}`;
   return `<div class="row tap" data-plan="${esc(p.id)}"><span class="name">${esc(p.name)}
       <div class="muted small ${b.overdue ? 'err' : ''}">${esc(when)}</div>
       <div class="muted small">${esc(planWhere(p))}</div>${b.flag ? `<div class="small err">${esc(b.flag)}</div>` : ''}</span>
