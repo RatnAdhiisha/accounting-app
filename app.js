@@ -343,7 +343,8 @@ function renderHome(v) {
   const accs = L.accounts();
   const eurRate = lastRate('EUR');
   const plan = planStatus();
-  // "R650 after planned": the balance minus what is still planned for this month.
+  // "R650 after planned" under each fund (whose money is left after plans). Not shown on pockets
+  // or the total: allocations are often not tied to a pocket, so it would give a mixed picture.
   const after = (x, left) => left > 0.004 ? `<div class="small ${x - left < 0 ? 'err' : 'muted'}">${money(x - left)} after planned</div>` : '';
 
   // Accounts, with pockets under their parent.
@@ -354,11 +355,10 @@ function renderHome(v) {
     if (kids.length) {
       const sum = kids.reduce((s, c) => s + (b.acc[c.id] || 0), 0);
       totalZar += sum;
-      const kidsLeft = kids.reduce((s, c) => s + (plan.byAcc[c.id] || 0), 0);
-      accRows += `<div class="row parent"><span class="name">${esc(a.name)}</span><span class="amt ${sum < 0 ? 'neg' : ''}">${money(sum)}${after(sum, kidsLeft)}</span></div>`;
+      accRows += `<div class="row parent"><span class="name">${esc(a.name)}</span><span class="amt ${sum < 0 ? 'neg' : ''}">${money(sum)}</span></div>`;
       for (const c of kids) {
         const x = b.acc[c.id] || 0;
-        accRows += `<div class="row sub"><span class="name">${esc(c.name)}</span><span class="amt ${x < 0 ? 'neg' : ''}">${money(x)}${after(x, plan.byAcc[c.id] || 0)}</span></div>`;
+        accRows += `<div class="row sub"><span class="name">${esc(c.name)}</span><span class="amt ${x < 0 ? 'neg' : ''}">${money(x)}</span></div>`;
       }
     } else if (shown(a)) {
       const x = b.acc[a.id] || 0, cur = a.currency || 'ZAR';
@@ -370,7 +370,6 @@ function renderHome(v) {
       } else totalZar += x;
       const kept = Object.keys(b.held).filter(k => k.split('|')[1] === a.id).reduce((s, k) => s + b.held[k], 0);
       if (kept > 0.004) extra += `<div class="muted small">${money(kept)} kept for others</div>`;
-      if (cur === 'ZAR') extra += after(x, plan.byAcc[a.id] || 0);
       accRows += `<div class="row"><span class="name">${esc(a.name)}</span><span class="amt ${x < 0 ? 'neg' : ''}">${money(x, cur)}${extra}</span></div>`;
     }
   }
@@ -426,13 +425,11 @@ function renderHome(v) {
     <div class="total-box">
       <div class="small">All money${missingRate ? ' (foreign cash without a rate left out)' : ''}</div>
       <div class="big">${money(totalZar)}</div>
-      ${plan.left > 0.004 ? `<div class="small">${money(totalZar - plan.left)} after planned spending this month</div>` : ''}
       ${owesMe || iOwe ? `<div class="small">${owesMe ? 'Owed back ' + money(owesMe) : ''}${owesMe && iOwe ? ' · ' : ''}${iOwe ? 'Owed to others ' + money(iOwe) : ''}</div>` : ''}
     </div>
     ${drafts.length ? `<h2>Drafts to finish</h2><div class="card">${drafts.map(d => `<div class="tx" data-draft="${esc(d.id)}"><div class="l"><div class="t1">${esc(d.who)}</div><div class="t2">${esc(niceDate(d.date))} · ${d.left ? money(d.left) + ' left to assign' : 'ready to save'}</div></div><div class="amt">${money(d.total)}</div></div>`).join('')}</div>` : ''}
     ${plan.soon.length ? `<h2>Due soon</h2><div class="card">${plan.soon.map(billRow).join('')}</div>` : ''}
     <h2>Accounts</h2><div class="card">${accRows}</div>
-    ${plan.noPocket > 0.004 ? `<div class="hint">${money(plan.noPocket)} planned with no pocket (${esc(plan.noPocketNames)}) is taken off the total and its fund, not off a pocket.</div>` : ''}
     <h2>Funds (whose money)</h2><div class="card">${fundRows}</div>
     ${fundDebtRows ? `<h2>Funds that owe each other</h2><div class="card">${fundDebtRows}</div>
       <div class="hint">When one fund's money pays for another fund, the other fund owes it back.</div>` : ''}
