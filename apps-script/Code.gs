@@ -72,7 +72,7 @@ const TABS = {
               'repeat', 'day', 'date', 'start', 'active', 'note', 'updated_at', 'skip'],
     rows: [],
   },
-  // Unfinished split payments. "data" holds the app's form as text.
+  // Unfinished split payments, and TymeBank SMS waiting to be finished. "data" holds the app's form as text.
   Drafts: {
     headers: ['id', 'updated_at', 'data'],
     rows: [],
@@ -193,6 +193,22 @@ function doPost(e) {
     if (req.action === 'scanReceipt') return json_({ ok: true, data: scanReceipt_(req.data) });
     lock.waitLock(10000);
     switch (req.action) {
+      // A TymeBank SMS sent by the iPhone Shortcut. It becomes a draft; nothing touches the balances.
+      // The Shortcut may send the text as "text" at the top level (simplest to set up) or inside "data".
+      case 'smsDraft': {
+        const text = String(req.text || (req.data && req.data.text) || '').trim();
+        if (!text) throw new Error('No SMS text given');
+        // SMS without an amount (OTPs, notices) are not money: nothing is saved.
+        if (!/R\s?\d/.test(text)) return json_({ ok: true, data: { ignored: true } });
+        const sh = sheet_('Drafts');
+        const headers = headers_(sh, TABS.Drafts.headers);
+        // The same SMS sent twice (the automation ran twice) is saved only once.
+        const same = readTab_('Drafts').find(r => { try { const x = JSON.parse(r.data); return x.sms && x.sms.text === text; } catch (e) { return false; } });
+        if (same) return json_({ ok: true, data: { id: same.id, duplicate: true } });
+        const row = { id: Utilities.getUuid(), updated_at: new Date().toISOString(), data: JSON.stringify(smsDraft_(text, new Date())) };
+        appendRows_(sh, headers, [row]);
+        return json_({ ok: true, data: { id: row.id } });
+      }
       case 'addTransaction': {
         const sh = sheet_('Transactions');
         const headers = headers_(sh, TABS.Transactions.headers);
@@ -321,6 +337,64 @@ function doPost(e) {
   } finally {
     try { lock.releaseLock(); } catch (e) {}
   }
+}
+
+// ---------- TymeBank SMS ----------
+// "GoTyme(*TymeBank). R432.76 purchase at Shoprite Orange Farm SB047541 ZA from Acc......5262. Bal R5937.49, 22Nov 14:33"
+// "GoTyme(*TymeBank). R10000.00 payment received for INV#008-REGENESYS FOUNDATION to Acc......5262. Bal R11155.90, 07Sep 18:21"
+// "GoTyme(*TymeBank). R1090.00 cash voucher sent voucher to 0847875809 from Acc......5262. Bal R10723.90; 09Sep 16:15"
+// Anything not understood still becomes a draft, with the whole SMS as the note.
+const MONTHS_ = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+
+function parseSms_(text, now) {
+  const t = String(text).replace(/\s+/g, ' ').trim();
+  const rand = s => Number(String(s).replace(/,/g, ''));
+  const out = { total: 0, mode: 'out', note: '', bal: null, date: '', time: '', ok: false };
+  const bal = t.match(/Bal\.?\s*R\s?(-?[\d,]+(?:\.\d{1,2})?)/i);
+  if (bal) out.bal = rand(bal[1]);
+  // Date at the end: "22Nov 14:33" (no year: this year, or last year if that would be in the future).
+  const dm = t.match(/(\d{1,2})\s?([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2}):(\d{2})(?!.*\d{1,2}\s?[A-Za-z]{3}\s+\d{1,2}:\d{2})/);
+  const pad = n => (n < 10 ? '0' : '') + n;
+  if (dm && MONTHS_[dm[2].toLowerCase()]) {
+    const m = MONTHS_[dm[2].toLowerCase()], d = Number(dm[1]);
+    let y = now.getFullYear();
+    if (new Date(y, m - 1, d) - now > 2 * 864e5) y--;
+    out.date = y + '-' + pad(m) + '-' + pad(d);
+    out.time = pad(Number(dm[3])) + ':' + dm[4];
+  }
+  // "R432.76 <what> from Acc…" (money out) or "R10000.00 <what> to Acc…" (money in).
+  const main = t.match(/R\s?([\d,]+(?:\.\d{1,2})?)\s+(.*?)\s+(from|to)\s+Acc\b/i);
+  if (!main) { out.note = t; return out; }
+  out.total = rand(main[1]);
+  let what = main[2];
+  out.mode = /^to$/i.test(main[3]) || /\breceived\b/i.test(what) ? 'in' : 'out';
+  let m;
+  if ((m = what.match(/^purchase at (.+)$/i))) {
+    // Drop the shop code and country at the end ("SB047541 ZA").
+    out.note = m[1].replace(/\s+\S*\d\S*\s+[A-Z]{2}$/, '').replace(/\s+ZA$/, '').trim();
+  } else if ((m = what.match(/^payment received (?:for|from) (.+)$/i))) {
+    out.note = m[1].trim();
+  } else if ((m = what.match(/^cash voucher sent (?:voucher )?to (.+)$/i))) {
+    out.note = 'Cash voucher to ' + m[1].trim();
+  } else {
+    out.note = what.charAt(0).toUpperCase() + what.slice(1);
+  }
+  out.ok = out.total > 0;
+  return out;
+}
+
+// The draft in the same shape as the app's split screen ("Save as draft").
+function smsDraft_(text, now) {
+  const p = parseSms_(text, now);
+  const date = p.date || Utilities.formatDate(now, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  const amount = p.total ? String(p.total) : '';
+  return {
+    mode: p.mode, total: amount, date, account: 'tyme', paid_to: '', note: p.note, fee: '', fee_part: 0,
+    parts: [{ type: p.mode === 'in' ? 'income' : 'expense', amount, pocket: '', fund: '', category: '', person: '',
+      advance: '', note: '', from: '' }],
+    receipt: null,
+    sms: { text: String(text), bal: p.bal, time: p.time, ok: p.ok, at: now.toISOString() },
+  };
 }
 
 // ---------- Receipts ----------

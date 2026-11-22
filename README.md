@@ -7,6 +7,19 @@ Phone-first home-screen web app for personal and fund accounting.
 
 No financial data is stored in this repository. The app keeps the Apps Script link and secret key only on the device.
 
+## TymeBank SMS drafts (version 0.10)
+
+An iPhone Shortcuts automation sends every SMS that contains `GoTyme(*TymeBank)` to the Apps Script
+(action `smsDraft`). The script reads amount, money in/out, shop or payer, date, time and the bank balance, and saves
+a **draft** (Drafts tab). Balances don't change. The draft shows under **Drafts to finish** as "from SMS · pick the
+pocket"; it opens on the payment screen with the SMS text, an **Already entered?** warning when a TymeBank entry with
+the same amount is within 3 days, and the bank balance next to the app's TymeBank total after saving.
+SMS without an amount (OTPs) are ignored; the same SMS sent twice is saved once; an SMS that can't be read still
+becomes a draft with the whole text as the note. Saved entries get `source` = `sms`.
+**Needs the new Code.gs** (paste + new deployment).
+
+Shortcut request: POST to the Apps Script link, body JSON `{ "action": "smsDraft", "key": "<secret key>", "text": "<SMS text>" }`.
+
 ## Receipts (version 0.9)
 
 **Scan receipt** (home screen, and on the Add form for money out): pick a scanned PDF (Files app > Scan Documents,
