@@ -51,6 +51,11 @@ input[type=date] { min-height:44px; -webkit-appearance:none; appearance:none; }
 .amount-wrap span { font-size:26px; color:var(--muted); }
 .amount-wrap input { border:0; font-size:30px; font-weight:600; padding:6px 0; background:transparent; }
 .amount-wrap input:focus { outline:none; }
+.calcrow { display:flex; align-items:center; gap:6px; margin-top:6px; }
+.calcbtn { border:1px solid var(--line); background:var(--card); color:var(--muted); border-radius:8px;
+  width:38px; min-width:38px; padding:6px 0; margin:0; font-size:17px; line-height:1.1; }
+.calcbtn:active { background:var(--accent); border-color:var(--accent); color:#fff; }
+.calcres { margin-left:auto; font-size:15px; font-weight:600; color:var(--muted); white-space:nowrap; }
 .chips { display:flex; flex-wrap:wrap; gap:8px; }
 .chip { border:1px solid var(--line); background:var(--card); color:var(--text); border-radius:18px; padding:8px 13px;
   font-size:15px; line-height:1.1; margin:0; width:auto; }
