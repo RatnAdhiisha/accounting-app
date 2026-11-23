@@ -1,7 +1,7 @@
-// Accounting app: quick entry, split payments, balances home screen, entry list, new people, planned spending, receipts.
+// Accounting app: quick entry, split payments, balances home screen, entry list, new people, planned spending, receipts, TymeBank SMS drafts.
 'use strict';
 
-const VERSION = '0.9.4';
+const VERSION = '0.10.0';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -426,7 +426,8 @@ function renderHome(v) {
   }).join('');
 
   const recent = listItems(sortedTxs(), false).slice(0, 5);
-  const drafts = state.drafts.map(d => Object.assign({ id: d.id }, draftInfo(d)));
+  const drafts = state.drafts.map(d => Object.assign({ id: d.id }, draftInfo(d)))
+    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.at).localeCompare(String(a.at)));
 
   v.innerHTML = `
     <header><h1>Accounting</h1><button class="refresh" id="refresh">↻ Refresh</button></header>
@@ -436,7 +437,7 @@ function renderHome(v) {
       <div class="small">All money${missingRate ? ' (foreign cash without a rate left out)' : ''}</div>
       <div class="big">${money(totalZar)}</div>
     </div>
-    ${drafts.length ? `<h2>Drafts to finish</h2><div class="card">${drafts.map(d => `<div class="tx" data-draft="${esc(d.id)}"><div class="l"><div class="t1">${esc(d.who)}</div><div class="t2">${esc(niceDate(d.date))} · ${d.left ? money(d.left) + ' left to assign' : 'ready to save'}</div></div><div class="amt">${money(d.total)}</div></div>`).join('')}</div>` : ''}
+    ${drafts.length ? `<h2>Drafts to finish</h2><div class="card">${drafts.map(d => `<div class="tx" data-draft="${esc(d.id)}"><div class="l"><div class="t1">${esc(d.who)}</div><div class="t2">${esc(niceDate(d.date))} · ${esc(d.status)}</div></div><div class="amt">${money(d.total)}</div></div>`).join('')}</div>` : ''}
     ${plan.soon.length ? `<h2>Due soon</h2><div class="card">${plan.soon.map(billRow).join('')}</div>` : ''}
     <h2>Accounts</h2><div class="card">${accRows}</div>
     <h2>Funds (whose money)</h2><div class="card">${fundRows}</div>
@@ -996,6 +997,7 @@ function renderSplit(v, args) {
   v.innerHTML = `
     <header><h1>${split.editGroup || split.editIds ? 'Edit payment' : 'Split payment'}</h1></header>
     <form id="split-form" autocomplete="off">
+      ${smsBox()}
       ${receiptBox()}
       ${chips('mode', [{ id: 'out', label: 'Money out' }, { id: 'in', label: 'Money in' }], split.mode)}
       <label for="s-total">Total ${out ? 'paid' : 'received'}</label>
@@ -1169,7 +1171,7 @@ function splitRows() {
     const amt = round2(num(p.amount));
     const base = { date: split.date, currency: 'ZAR', rate: '', fund: p.fund, to_account: '', to_fund: '',
       category: typeOf(p.type).person && !p.category ? '' : p.category, person: p.person || '',
-      paid_to: split.paid_to || '', receipt_url: split.receipt ? split.receipt.url : '', source: 'app' };
+      paid_to: split.paid_to || '', receipt_url: split.receipt ? split.receipt.url : '', source: split.sms ? 'sms' : 'app' };
     const own = p.type === 'transfer';
     rows.push(Object.assign({}, base, { type: p.type, amount: amt, amount_zar: amt,
       account: own ? p.from : p.pocket, to_account: own ? p.pocket : '',
@@ -1225,7 +1227,7 @@ async function saveDraft() {
   const msg = $('form-msg');
   if (split.receipt && split.receipt.pending) { msg.className = 'hint err'; msg.textContent = 'Still reading the receipt. A few more seconds…'; return; }
   const data = {};
-  for (const k of ['mode', 'total', 'date', 'account', 'paid_to', 'note', 'fee', 'fee_part', 'parts', 'editGroup', 'editIds', 'receipt']) data[k] = split[k];
+  for (const k of ['mode', 'total', 'date', 'account', 'paid_to', 'note', 'fee', 'fee_part', 'parts', 'editGroup', 'editIds', 'receipt', 'sms']) data[k] = split[k];
   const btn = $('save-draft'); btn.disabled = true; btn.textContent = 'Saving draft…';
   try {
     // A draft keeps its receipt in Drive (it can't hold the file itself).
@@ -1252,8 +1254,10 @@ function draftInfo(d) {
   try { x = JSON.parse(d.data); } catch (e) {}
   const total = num(x.total), parts = x.parts || [];
   const left = round2(total - parts.reduce((s, p) => s + num(p.amount), 0));
-  const who = x.paid_to ? nameOf(L.people(), x.paid_to) : (x.note || 'Split payment');
-  return { total, left, who, date: x.date };
+  const who = x.paid_to ? nameOf(L.people(), x.paid_to) : (x.note || (x.sms ? 'TymeBank SMS' : 'Split payment'));
+  const status = x.sms && parts.some(p => !p.pocket) ? 'from SMS · pick the pocket'
+    : left ? money(left) + ' left to assign' : 'ready to save';
+  return { total, left, who, date: x.date, status, at: (x.sms && x.sms.at) || d.updated_at || '' };
 }
 
 // One payment, all parts.
@@ -1610,6 +1614,59 @@ function moveReceiptItem(i) {
   }
   it.part = next;
   applyReceiptItems();
+}
+
+// ---------- TymeBank SMS drafts ----------
+// The iPhone Shortcut sends each TymeBank SMS to Apps Script, which saves it as a draft (see Code.gs smsDraft).
+
+// TymeBank money in the app, all pockets together (the bank only knows the total).
+function tymeTotal(b) {
+  return round2(L.accounts().filter(a => topOf(a.id) === 'tyme').reduce((s, a) => s + (b.acc[a.id] || 0), 0));
+}
+
+// Entries already in the app for this SMS: TymeBank, same amount and direction, within 3 days.
+function smsMatches() {
+  const total = round2(num(split.total));
+  if (!(total > 0) || !split.date) return [];
+  const near = d => Math.abs((new Date(d) - new Date(split.date)) / 864e5) <= 3;
+  const out = split.mode !== 'in';
+  return listItems(sortedTxs(), false).map(it => {
+    const rows = it.t ? [it.t] : groupRows(it.g), cash = it.t ? rows : cashRows(rows);
+    if (!cash.length || topOf(rowAcc(cash[0])) !== 'tyme') return null;
+    const dir = it.t ? typeOf(it.t.type).dir : (groupOut(cash) ? -1 : 1);
+    if (!dir || (dir < 0) !== out) return null;
+    const sum = round2(cash.reduce((s, t) => s + num(t.amount), 0));
+    if (Math.abs(sum - total) > 0.01 || !near(cash[0].date)) return null;
+    return { href: it.g ? '#pay/' + encodeURIComponent(it.g) : '#tx/' + encodeURIComponent(it.t.id),
+      label: [niceDate(cash[0].date), money(sum), cash[0].note || ''].filter(Boolean).join(' · ') };
+  }).filter(Boolean).slice(0, 3);
+}
+
+function smsBox() {
+  const s = split.sms;
+  if (!s) return '';
+  const b = balances();
+  // The bank balance only matches when this is the newest SMS still waiting.
+  const newer = state.drafts.some(d => {
+    if (d.id === split.draftId) return false;
+    try { const x = JSON.parse(d.data); return x.sms && String(x.sms.at) > String(s.at); } catch (e) { return false; }
+  });
+  let balLine = '';
+  if (s.bal !== null && s.bal !== undefined && s.bal !== '') {
+    const delta = (split.mode === 'in' ? 1 : -1) * num(split.total) - num(split.fee);
+    const after = round2(tymeTotal(b) + delta), diff = round2(after - num(s.bal));
+    balLine = `<div class="t2">Bank balance after this: <b>${money(num(s.bal))}</b></div>` + (newer
+      ? '<div class="hint">There is a newer SMS draft, so compare the balance there.</div>'
+      : `<div class="t2">TymeBank in the app after saving: <b>${money(after)}</b> ${Math.abs(diff) < 0.01 ? '✓'
+        : `<br><span class="hint err">${money(Math.abs(diff))} ${diff > 0 ? 'more' : 'less'} than the bank. An entry may be missing, or there was a fee.</span>`}</div>`);
+  }
+  const matches = smsMatches().map(m => `<div class="rmatch warn"><b>Already entered?</b> ${esc(m.label)}
+    <a class="ghost btn-link" href="${m.href}">Open that entry</a><div class="hint">If it is the same, delete this draft.</div></div>`).join('');
+  return `<div class="card pad receipt"><div class="t1">From TymeBank SMS${s.time ? ' · ' + esc(s.time) : ''}</div>
+    <div class="t2 muted">${esc(s.text)}</div>
+    ${s.ok ? '' : '<div class="hint err">Couldn\'t read this SMS. Fill in the amount and details.</div>'}
+    ${balLine}${matches}
+    ${split.parts.some(p => !p.pocket) ? '<div class="hint">Pick the pocket below. The bank doesn\'t know your pockets.</div>' : ''}</div>`;
 }
 
 function receiptBox() {
