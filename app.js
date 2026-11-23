@@ -1,7 +1,7 @@
 // Accounting app: quick entry, split payments, balances home screen, entry list, new people, planned spending, receipts, TymeBank SMS drafts.
 'use strict';
 
-const VERSION = '0.10.0';
+const VERSION = '0.11.0';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -128,11 +128,102 @@ const isMove = t => ['transfer', 'exchange', 'fund_transfer'].includes(typeOf(t.
 // Amounts typed on the phone: "212,40" (the South African keyboard has a comma, not a point) is
 // R212.40; "1,049" or "1 049.50" use the comma or space between thousands.
 const num = v => {
+  const calc = evalExpr(v);
+  if (calc !== null) return calc;
+  if (hasOp(v)) return 0;              // half-typed or impossible sum: not an amount
   let s = String(v == null ? '' : v).replace(/[\s\u00a0]/g, '');
   if (!s.includes('.') && /,\d{1,2}$/.test(s)) s = s.replace(/,(\d{1,2})$/, '.$1');
   const n = parseFloat(s.replace(/,/g, ''));
   return isFinite(n) ? n : 0;
 };
+
+// ---------- Calculator in amount fields ----------
+// Any amount field also takes a sum: "217/2", "180+45,50", "3*12", "(100+20)/2".
+// A comma before one or two digits is the decimal comma; other commas and spaces separate thousands.
+const OPS = { '+': '+', '\u2212': '-', '\u00d7': '*', '\u00f7': '/', '(': '(', ')': ')' };
+const hasOp = v => /[+\-*/x\u00d7\u00f7()]/i.test(String(v == null ? '' : v).slice(1));
+
+// Works out a typed sum. Returns a number, or null when the text is not a sum we can read.
+function evalExpr(v) {
+  let s = String(v == null ? '' : v).replace(/[\s\u00a0]/g, '')
+    .replace(/[x\u00d7]/gi, '*').replace(/\u00f7/g, '/').replace(/[\u2212\u2013\u2014]/g, '-');
+  if (!s) return null;
+  if (!/^[0-9.,+\-*/()]+$/.test(s)) return null;
+  s = s.replace(/,(\d{1,2})(?!\d)/g, '.$1').replace(/,/g, '');
+  let i = 0;
+  const at = () => s[i];
+  const fail = () => { throw new Error('bad'); };
+  const expr = () => {
+    let x = term();
+    for (;;) {
+      if (at() === '+') { i++; x += term(); }
+      else if (at() === '-') { i++; x -= term(); }
+      else return x;
+    }
+  };
+  const term = () => {
+    let x = unary();
+    for (;;) {
+      if (at() === '*') { i++; x *= unary(); }
+      else if (at() === '/') { i++; const d = unary(); if (!d) fail(); x /= d; }
+      else return x;
+    }
+  };
+  const unary = () => {
+    if (at() === '-') { i++; return -unary(); }
+    if (at() === '+') { i++; return unary(); }
+    return atom();
+  };
+  const atom = () => {
+    if (at() === '(') {
+      i++; const x = expr();
+      if (at() !== ')') fail();
+      i++; return x;
+    }
+    const m = /^(?:\d+\.?\d*|\.\d+)/.exec(s.slice(i));
+    if (!m) fail();
+    i += m[0].length;
+    return parseFloat(m[0]);
+  };
+  try {
+    const x = expr();
+    if (i !== s.length || !isFinite(x)) return null;
+    return Math.round(x * 1e6) / 1e6;
+  } catch (e) { return null; }
+}
+
+// The row of operator buttons under an amount field, with the worked-out answer on the right.
+// The phone's number keypad has no + \u2212 \u00d7 \u00f7, so the buttons type them.
+const calcRow = id => `<div class="calcrow" data-for="${id}">${Object.keys(OPS)
+  .map(o => `<button type="button" class="calcbtn" data-op="${o}">${o}</button>`).join('')
+  }<span class="calcres"></span></div>`;
+
+function wireCalc(id, onChange) {
+  const inp = $(id); if (!inp) return;
+  const row = document.querySelector(`.calcrow[data-for="${id}"]`);
+  const out = row && row.querySelector('.calcres');
+  const show = () => {
+    if (!out) return;
+    if (!hasOp(inp.value)) { out.textContent = ''; return; }
+    const n = evalExpr(inp.value);
+    out.textContent = n === null ? '?' : '= ' + money(n);
+  };
+  inp.addEventListener('input', show);
+  if (row) row.addEventListener('pointerdown', e => {
+    const btn = e.target.closest('.calcbtn'); if (!btn) return;
+    e.preventDefault();                            // keep the keyboard open
+    const ch = OPS[btn.dataset.op];
+    const a = inp.selectionStart, b = inp.selectionEnd;
+    if (a == null) { inp.value += ch; } else {
+      inp.value = inp.value.slice(0, a) + ch + inp.value.slice(b);
+      try { inp.setSelectionRange(a + ch.length, a + ch.length); } catch (err) {}
+    }
+    inp.focus();
+    show();
+    if (onChange) onChange();
+  });
+  show();
+}
 
 function normTx(t) {
   return Object.assign({}, t, { date: toDay(t.date) });
@@ -632,6 +723,7 @@ function renderAdd(v) {
       <label for="f-amount">Amount${cur !== 'ZAR' ? ' (' + cur + ')' : ''}</label>
       <div class="amount-wrap"><span>${SYMBOL[cur] || cur}</span>
         <input id="f-amount" inputmode="decimal" enterkeyhint="done" placeholder="0.00" value="${esc(form.amount)}"></div>
+      ${calcRow('f-amount')}
 
       ${type.person || type.who || isOpening ? `<div class="lbl">Person${isOpening ? ' (only for a person\'s opening balance)' : ''}</div>${chips('person', people, form.person, isOpening ? { none: 'No one', add: true } : { add: true })}` : ''}
 
@@ -674,6 +766,7 @@ function renderAdd(v) {
     </form>`;
 
   const f = $('entry-form');
+  wireCalc('f-amount');
   // Keep typed values when the form re-draws.
   const sync = () => {
     form.amount = $('f-amount').value; form.note = $('f-note').value; form.date = $('f-date').value;
@@ -757,6 +850,7 @@ const fundLabel = fid => !fid ? 'no fund set' : fid === 'personal' ? 'you (Perso
 
 function validate() {
   const type = typeOf(form.type);
+  if (hasOp(form.amount) && evalExpr(form.amount) === null) return 'That sum does not work out. Check the amount.';
   const amt = num(form.amount);
   if (!amt || (amt < 0 && type.id !== 'opening')) return 'Enter an amount.';
   if (!form.date) return 'Pick a date.';
@@ -974,6 +1068,7 @@ function renderSplit(v, args) {
     return `<div class="part open">
       <div class="part-head"><b>Part ${i + 1}</b>${split.parts.length > 1 ? `<button type="button" class="link danger" data-remove="${i}">Remove</button>` : ''}</div>
       <div class="amount-wrap small-amt"><span>R</span><input id="p-amount" inputmode="decimal" enterkeyhint="done" placeholder="0.00" value="${esc(p.amount)}"></div>
+      ${calcRow('p-amount')}
       <button type="button" class="link" id="fill-rest">Fill the rest</button>
       ${pockets.length > 1 ? `<div class="lbl">Pocket</div>${chips('pocket', pockets, p.pocket)}` : ''}
       <div class="lbl">What</div>${chips('ptype', typeItems, p.type)}
@@ -1002,6 +1097,7 @@ function renderSplit(v, args) {
       ${chips('mode', [{ id: 'out', label: 'Money out' }, { id: 'in', label: 'Money in' }], split.mode)}
       <label for="s-total">Total ${out ? 'paid' : 'received'}</label>
       <div class="amount-wrap"><span>R</span><input id="s-total" inputmode="decimal" enterkeyhint="done" placeholder="0.00" value="${esc(split.total)}"></div>
+      ${calcRow('s-total')}
       <div class="lbl">${out ? 'From' : 'Into'}</div>${chips('account', accs, split.account)}
       <div class="lbl">${out ? 'Paid to' : 'Received from'} (optional)</div>${chips('paid_to', people, split.paid_to, { none: 'No one', add: true })}
       <div id="left-box"></div>
@@ -1032,7 +1128,11 @@ function renderSplit(v, args) {
   };
   const redraw = () => { renderSplit(v, args); };
   $('s-total').oninput = () => { split.total = $('s-total').value; updateLeft(); };
-  if ($('p-amount')) $('p-amount').oninput = () => { split.parts[split.open].amount = $('p-amount').value; updateLeft(); };
+  wireCalc('s-total', () => { split.total = $('s-total').value; updateLeft(); });
+  if ($('p-amount')) {
+    $('p-amount').oninput = () => { split.parts[split.open].amount = $('p-amount').value; updateLeft(); };
+    wireCalc('p-amount', () => { split.parts[split.open].amount = $('p-amount').value; updateLeft(); });
+  }
   if ($('fill-rest')) $('fill-rest').onclick = () => {
     sync(); const p = split.parts[split.open];
     const rest = round2(num(p.amount) + splitLeft());
@@ -1143,11 +1243,13 @@ function renderSplit(v, args) {
 
 function validateSplit() {
   if (split.receipt && split.receipt.pending) return 'Still reading the receipt. A few more seconds…';
+  if (hasOp(split.total) && evalExpr(split.total) === null) return 'That sum does not work out. Check the total.';
   if (!(num(split.total) > 0)) return 'Type the total.';
   if (!split.date) return 'Pick a date.';
   if (!split.account) return 'Pick the account.';
   for (let i = 0; i < split.parts.length; i++) {
     const p = split.parts[i], t = typeOf(p.type), n = `Part ${i + 1}: `;
+    if (hasOp(p.amount) && evalExpr(p.amount) === null) return n + 'that sum does not work out.';
     if (!(num(p.amount) > 0)) return n + 'enter an amount.';
     if (!p.pocket) return n + 'pick the pocket.';
     if (!p.fund) return n + 'pick the fund.';
@@ -1771,6 +1873,7 @@ function openNewPerson(fund, onDone) {
       <div class="lbl">Money already owed? (optional)</div>
       ${chips('np-dir', [{ id: 'owes', name: 'Owes me' }, { id: 'owed', name: 'I owe them' }], np.dir, { none: 'No' })}
       ${np.dir ? `<div class="amount-wrap small-amt"><span>R</span><input id="np-amount" inputmode="decimal" enterkeyhint="done" placeholder="0.00" value="${esc(np.amount)}"></div>
+      ${calcRow('np-amount')}
         <div class="lbl">Fund</div>${chips('np-fund', funds, np.fund)}
         <div class="hint">Saved as a starting balance dated today.</div>` : ''}
       <button type="button" class="primary" id="np-save" ${np.saving ? 'disabled' : ''}>${np.saving ? 'Saving…' : 'Add person'}</button>
@@ -1795,6 +1898,7 @@ function openNewPerson(fund, onDone) {
       draw();
       if (g.dataset.name === 'np-dir' && np.dir && $('np-amount')) $('np-amount').focus();
     });
+    wireCalc('np-amount');
     $('np-cancel').onclick = close;
     $('np-save').onclick = save;
   };
@@ -2091,6 +2195,7 @@ function renderPlanEdit(v) {
       <div class="hint">${bill ? 'An entry whose note has this name ticks the bill by itself.' : 'An entry counts when you pick this allocation on the entry form, or when its note has the words of this name.'}</div>
       <label for="p-amount">${bill ? 'Amount' : P.repeat === 'monthly' ? 'Amount per month' : 'Amount'}</label>
       <div class="amount-wrap small-amt"><span>R</span><input id="p-amount" inputmode="decimal" placeholder="0.00" value="${esc(P.amount)}"></div>
+      ${calcRow('p-amount')}
       ${bill ? `<div class="lbl">When</div>${chips('repeat', [{ id: 'monthly', name: 'Every month' }, { id: 'once', name: 'Once' }], P.repeat)}
         ${P.repeat === 'once' ? `<label for="p-date">Date</label><input id="p-date" type="date" value="${esc(P.date)}">`
           : `<label for="p-day">Day of the month</label><input id="p-day" inputmode="numeric" placeholder="e.g. 25" value="${esc(P.day)}">`}`
@@ -2111,6 +2216,7 @@ function renderPlanEdit(v) {
     </form>
     ${st && st.used.length ? `<h2>Counted entries</h2><div class="card">${st.used.map(txRow).join('')}</div>` : ''}`;
   bindTxRows(v);
+  wireCalc('p-amount');
   const sync = () => {
     P.name = $('p-name').value; P.amount = $('p-amount').value;
     if ($('p-day')) P.day = $('p-day').value;
