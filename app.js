@@ -1,7 +1,7 @@
 // Accounting app: quick entry, split payments, balances home screen, entry list, new people, planned spending, receipts, TymeBank SMS drafts.
 'use strict';
 
-const VERSION = '0.11.0';
+const VERSION = '0.11.1';
 const $ = id => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
@@ -1766,7 +1766,9 @@ function smsBox() {
     <a class="ghost btn-link" href="${m.href}">Open that entry</a><div class="hint">If it is the same, delete this draft.</div></div>`).join('');
   return `<div class="card pad receipt"><div class="t1">From TymeBank SMS${s.time ? ' · ' + esc(s.time) : ''}</div>
     <div class="t2 muted">${esc(s.text)}</div>
-    ${s.ok ? '' : '<div class="hint err">Couldn\'t read this SMS. Fill in the amount and details.</div>'}
+    ${!s.ok ? '<div class="hint err">Couldn\'t read this SMS. Fill in the amount and details.</div>'
+      : s.from_bal ? `<div class="hint err">This SMS has no amount. ${money(num(split.total))} is worked out from the balance (${money(num(s.from_bal))} before, ${money(num(s.bal))} after). Check it.</div>`
+      : !num(split.total) ? '<div class="hint err">This SMS has no amount. Type it in.</div>' : ''}
     ${balLine}${matches}
     ${split.parts.some(p => !p.pocket) ? '<div class="hint">Pick the pocket below. The bank doesn\'t know your pockets.</div>' : ''}</div>`;
 }

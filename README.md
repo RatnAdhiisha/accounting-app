@@ -14,7 +14,7 @@ An iPhone Shortcuts automation sends every SMS that contains `GoTyme(*TymeBank)`
 a **draft** (Drafts tab). Balances don't change. The draft shows under **Drafts to finish** as "from SMS · pick the
 pocket"; it opens on the payment screen with the SMS text, an **Already entered?** warning when a TymeBank entry with
 the same amount is within 3 days, and the bank balance next to the app's TymeBank total after saving.
-SMS without an amount (OTPs) are ignored; the same SMS sent twice is saved once; an SMS that can't be read still
+Since 0.11.1 the GoTyme app's SMS are read too ("You paid R300.00 to …", "You bought … bundle from MTN"); a bundle SMS has no amount, so it is worked out from the drop in balance since the last SMS and the app asks to check it. Use `GoTyme` as the automation's "Message Contains" text. SMS without a balance (OTPs, news) are ignored; the same SMS sent twice is saved once; an SMS that can't be read still
 becomes a draft with the whole text as the note. Saved entries get `source` = `sms`.
 **Needs the new Code.gs** (paste + new deployment).
 

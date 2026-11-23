@@ -198,14 +198,19 @@ function doPost(e) {
       case 'smsDraft': {
         const text = String(req.text || (req.data && req.data.text) || '').trim();
         if (!text) throw new Error('No SMS text given');
-        // SMS without an amount (OTPs, notices) are not money: nothing is saved.
-        if (!/R\s?\d/.test(text)) return json_({ ok: true, data: { ignored: true } });
+        // Every money SMS ends with the balance. SMS without one (OTPs, news from the bank) are not saved.
+        if (!/\bBal\b|available balance/i.test(text)) return json_({ ok: true, data: { ignored: true } });
         const sh = sheet_('Drafts');
         const headers = headers_(sh, TABS.Drafts.headers);
         // The same SMS sent twice (the automation ran twice) is saved only once.
         const same = readTab_('Drafts').find(r => { try { const x = JSON.parse(r.data); return x.sms && x.sms.text === text; } catch (e) { return false; } });
         if (same) return json_({ ok: true, data: { id: same.id, duplicate: true } });
-        const row = { id: Utilities.getUuid(), updated_at: new Date().toISOString(), data: JSON.stringify(smsDraft_(text, new Date())) };
+        // The last bank balance seen, to work out amounts the SMS doesn't give ("You bought … bundle").
+        const props = PropertiesService.getScriptProperties();
+        const prev = props.getProperty('SMS_LAST_BAL');
+        const draft = smsDraft_(text, new Date(), prev === null || prev === '' ? null : Number(prev));
+        if (draft.sms.bal !== null) props.setProperty('SMS_LAST_BAL', String(draft.sms.bal));
+        const row = { id: Utilities.getUuid(), updated_at: new Date().toISOString(), data: JSON.stringify(draft) };
         appendRows_(sh, headers, [row]);
         return json_({ ok: true, data: { id: row.id } });
       }
@@ -343,6 +348,10 @@ function doPost(e) {
 // "GoTyme(*TymeBank). R432.76 purchase at Shoprite Orange Farm SB047541 ZA from Acc......5262. Bal R5937.49, 22Nov 14:33"
 // "GoTyme(*TymeBank). R10000.00 payment received for INV#008-REGENESYS FOUNDATION to Acc......5262. Bal R11155.90, 07Sep 18:21"
 // "GoTyme(*TymeBank). R1090.00 cash voucher sent voucher to 0847875809 from Acc......5262. Bal R10723.90; 09Sep 16:15"
+// Payments made in the GoTyme app (no date: the time the SMS came is used):
+// "GoTyme Bank. You paid R300.00 to J. PHALATSE. Your available balance is R5577.99"
+// "GoTyme Bank formerly TymeBank. You bought Monthly WhatsApp 1.2GB and Voice Bundle from MTN, for 0787312560. Your available balance is 4255.12"
+//   (no amount: it is worked out from the last balance, and the app asks to check it)
 // Anything not understood still becomes a draft, with the whole SMS as the note.
 const MONTHS_ = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
 
@@ -350,7 +359,7 @@ function parseSms_(text, now) {
   const t = String(text).replace(/\s+/g, ' ').trim();
   const rand = s => Number(String(s).replace(/,/g, ''));
   const out = { total: 0, mode: 'out', note: '', bal: null, date: '', time: '', ok: false };
-  const bal = t.match(/Bal\.?\s*R\s?(-?[\d,]+(?:\.\d{1,2})?)/i);
+  const bal = t.match(/(?:\bBal\.?|available balance is)\s*R?\s?(-?[\d,]+(?:\.\d{1,2})?)/i);
   if (bal) out.bal = rand(bal[1]);
   // Date at the end: "22Nov 14:33" (no year: this year, or last year if that would be in the future).
   const dm = t.match(/(\d{1,2})\s?([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2}):(\d{2})(?!.*\d{1,2}\s?[A-Za-z]{3}\s+\d{1,2}:\d{2})/);
@@ -364,11 +373,27 @@ function parseSms_(text, now) {
   }
   // "R432.76 <what> from Acc…" (money out) or "R10000.00 <what> to Acc…" (money in).
   const main = t.match(/R\s?([\d,]+(?:\.\d{1,2})?)\s+(.*?)\s+(from|to)\s+Acc\b/i);
-  if (!main) { out.note = t; return out; }
+  let m;
+  if (!main) {
+    const clean = s => s.trim().replace(/[.,]+$/, '');
+    if ((m = t.match(/You paid R\s?([\d,]+(?:\.\d{1,2})?) to (.+?)\.\s+Your available balance/i))) {
+      out.total = rand(m[1]); out.note = clean(m[2]);
+    } else if ((m = t.match(/You (?:have )?received R\s?([\d,]+(?:\.\d{1,2})?) from (.+?)\.\s+Your available balance/i))) {
+      out.total = rand(m[1]); out.mode = 'in'; out.note = clean(m[2]);
+    } else if ((m = t.match(/You bought (.+?) from (.+?), for (\S+?)\.?\s+Your available balance/i))) {
+      out.note = clean(m[1]) + ' (' + clean(m[2]) + ', ' + clean(m[3]) + ')';
+      out.noAmount = true;
+    } else if ((m = t.match(/R\s?([\d,]+(?:\.\d{1,2})?)/)) && m.index < t.search(/available balance|\bBal\b/i)) {
+      // Another kind: the first amount, the SMS as the note.
+      out.total = rand(m[1]); out.note = t; out.mode = /\breceived\b|\bdeposit/i.test(t) ? 'in' : 'out';
+      return out;
+    } else { out.note = t; return out; }
+    out.ok = out.total > 0 || !!out.noAmount;
+    return out;
+  }
   out.total = rand(main[1]);
   let what = main[2];
   out.mode = /^to$/i.test(main[3]) || /\breceived\b/i.test(what) ? 'in' : 'out';
-  let m;
   if ((m = what.match(/^purchase at (.+)$/i))) {
     // Drop the shop code and country at the end ("SB047541 ZA").
     out.note = m[1].replace(/\s+\S*\d\S*\s+[A-Z]{2}$/, '').replace(/\s+ZA$/, '').trim();
@@ -384,16 +409,24 @@ function parseSms_(text, now) {
 }
 
 // The draft in the same shape as the app's split screen ("Save as draft").
-function smsDraft_(text, now) {
+function smsDraft_(text, now, prevBal) {
   const p = parseSms_(text, now);
-  const date = p.date || Utilities.formatDate(now, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  const tz = Session.getScriptTimeZone();
+  const date = p.date || Utilities.formatDate(now, tz, 'yyyy-MM-dd');
+  if (!p.time) p.time = Utilities.formatDate(now, tz, 'HH:mm');
+  // No amount in the SMS: the drop in the balance since the last SMS (only money out).
+  let fromBal = null;
+  if (!p.total && p.noAmount && p.bal !== null && prevBal !== null && !isNaN(prevBal)) {
+    const drop = Math.round((prevBal - p.bal) * 100) / 100;
+    if (drop > 0) { p.total = drop; fromBal = prevBal; }
+  }
   const amount = p.total ? String(p.total) : '';
   return {
     mode: p.mode, total: amount, date, account: 'tyme', paid_to: '', note: p.note, fee: '', fee_part: 0,
     parts: [{ type: p.mode === 'in' ? 'income' : 'expense', amount, pocket: '', fund: '', category: '', person: '',
       advance: '', note: '', from: '' }],
     receipt: null,
-    sms: { text: String(text), bal: p.bal, time: p.time, ok: p.ok, at: now.toISOString() },
+    sms: { text: String(text), bal: p.bal, time: p.time, ok: p.ok, at: now.toISOString(), from_bal: fromBal },
   };
 }
 
